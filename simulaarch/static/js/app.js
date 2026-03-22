@@ -3,6 +3,7 @@ const state = {
     edges: {},
     selectedId: null,
     selectedType: null,
+    connecting: null,
 };
 
 const NODE_COLORS = {
@@ -24,8 +25,8 @@ const NODE_LABELS = {
 const NODE_W = 120;
 const NODE_H = 56;
 
-function generateId() {
-    return 'node-' + Date.now() + '-' + Math.floor(Math.random() * 10000);
+function generateId(prefix = 'node') {
+    return prefix + '-' + Date.now() + '-' + Math.floor(Math.random() * 10000);
 }
 
 function setStatus(msg, type = '') {
@@ -81,7 +82,7 @@ function getNodeIcon(type, color) {
     }
 }
 
-// ─── Render ───────────────────────────────────────────────────────────────────
+// ─── Render Nodes ─────────────────────────────────────────────────────────────
 
 function renderNode(node) {
     const layer = document.getElementById('nodes-layer');
@@ -95,7 +96,7 @@ function renderNode(node) {
     g.setAttribute('id', node.id);
     g.setAttribute('class', 'canvas-node');
     g.setAttribute('transform', `translate(${node.x}, ${node.y})`);
-    g.style.cursor = 'pointer';
+    g.style.cursor = state.connecting ? 'crosshair' : 'pointer';
 
     g.innerHTML = `
         <rect class="node-bg" x="0" y="0" width="${NODE_W}" height="${NODE_H}"
@@ -113,23 +114,33 @@ function renderNode(node) {
               font-family="'Segoe UI', sans-serif">${NODE_LABELS[node.type] || node.type}</text>
         <circle class="node-port" cx="${NODE_W}" cy="${NODE_H / 2}"
                 r="5" fill="${color}" stroke="#1e1e2e" stroke-width="1.5"
-                style="cursor:crosshair" data-id="${node.id}"/>
+                style="cursor:crosshair"/>
     `;
 
-    let dragging = false;
-    let dragOffX = 0, dragOffY = 0;
+    // Click on port → start connecting
+    const port = g.querySelector('.node-port');
+    port.addEventListener('mousedown', e => {
+        e.stopPropagation();
+        startConnecting(node.id);
+    });
 
+    // Click on node body → finish connecting OR select
     g.addEventListener('mousedown', e => {
         if (e.target.classList.contains('node-port')) return;
         e.stopPropagation();
+
+        if (state.connecting) {
+            finishConnecting(node.id);
+            return;
+        }
 
         selectNode(node.id);
 
         const svg = document.getElementById('canvas');
         const rect = svg.getBoundingClientRect();
-        dragOffX = e.clientX - rect.left - node.x;
-        dragOffY = e.clientY - rect.top - node.y;
-        dragging = true;
+        let dragOffX = e.clientX - rect.left - node.x;
+        let dragOffY = e.clientY - rect.top - node.y;
+        let dragging = true;
 
         const onMove = ev => {
             if (!dragging) return;
@@ -152,6 +163,8 @@ function renderNode(node) {
     layer.appendChild(g);
 }
 
+// ─── Render Edges ─────────────────────────────────────────────────────────────
+
 function renderEdges() {
     const layer = document.getElementById('edges-layer');
     layer.innerHTML = '';
@@ -167,32 +180,121 @@ function renderEdges() {
         const y2 = to.y + NODE_H / 2;
         const mx = (x1 + x2) / 2;
 
-        const isAsync = edge.type === 'async';
-        const color   = isAsync ? '#fab387' : '#585b70';
-        const marker  = isAsync ? 'url(#arrowhead-async)' : 'url(#arrowhead)';
+        const isAsync      = edge.type === 'async';
+        const isSelected   = state.selectedId === edge.id;
+        const color        = isSelected ? '#f9e2af' : (isAsync ? '#fab387' : '#6c7086');
+        const marker       = isAsync ? 'url(#arrowhead-async)' : 'url(#arrowhead)';
 
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         path.setAttribute('d', `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
         path.setAttribute('fill', 'none');
         path.setAttribute('stroke', color);
-        path.setAttribute('stroke-width', '2');
+        path.setAttribute('stroke-width', isSelected ? '3' : '2');
         if (isAsync) path.setAttribute('stroke-dasharray', '6,3');
         path.setAttribute('marker-end', marker);
         path.style.cursor = 'pointer';
-        path.dataset.id = edge.id;
 
-        path.addEventListener('click', e => {
-            e.stopPropagation();
+        // Invisible wider hit area
+        const hitPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        hitPath.setAttribute('d', `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
+        hitPath.setAttribute('fill', 'none');
+        hitPath.setAttribute('stroke', 'transparent');
+        hitPath.setAttribute('stroke-width', '12');
+        hitPath.style.cursor = 'pointer';
+        hitPath.addEventListener('click', ev => {
+            ev.stopPropagation();
             selectNode(edge.id, 'edge');
         });
 
         layer.appendChild(path);
+        layer.appendChild(hitPath);
     });
 }
 
 function renderAll() {
     Object.values(state.nodes).forEach(renderNode);
     renderEdges();
+}
+
+// ─── Connecting Mode ──────────────────────────────────────────────────────────
+
+function startConnecting(fromId) {
+    state.connecting = { fromId };
+    svgCanvas.style.cursor = 'crosshair';
+    setStatus('Clique em outro nó para criar a conexão. ESC para cancelar.', 'warn');
+
+    const from = state.nodes[fromId];
+    const pendingLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    pendingLine.setAttribute('id', 'pending-edge');
+    pendingLine.setAttribute('stroke', '#f9e2af');
+    pendingLine.setAttribute('stroke-width', '2');
+    pendingLine.setAttribute('stroke-dasharray', '6,3');
+    pendingLine.setAttribute('pointer-events', 'none');
+    document.getElementById('edges-layer').appendChild(pendingLine);
+
+    const onMouseMove = e => {
+        if (!state.connecting) return;
+        const rect = svgCanvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        pendingLine.setAttribute('x1', from.x + NODE_W);
+        pendingLine.setAttribute('y1', from.y + NODE_H / 2);
+        pendingLine.setAttribute('x2', mx);
+        pendingLine.setAttribute('y2', my);
+    };
+
+    state.connecting._onMouseMove = onMouseMove;
+    document.addEventListener('mousemove', onMouseMove);
+}
+
+function finishConnecting(toId) {
+    if (!state.connecting) return;
+    const { fromId, _onMouseMove } = state.connecting;
+
+    document.removeEventListener('mousemove', _onMouseMove);
+    document.getElementById('pending-edge')?.remove();
+    state.connecting = null;
+    svgCanvas.style.cursor = '';
+
+    if (fromId === toId) {
+        setStatus('Não é possível conectar um nó a ele mesmo.', 'error');
+        return;
+    }
+
+    const duplicate = Object.values(state.edges).find(
+        e => e.from === fromId && e.to === toId
+    );
+    if (duplicate) {
+        setStatus('Já existe uma conexão entre esses nós.', 'error');
+        return;
+    }
+
+    const fromType = state.nodes[fromId]?.type;
+    const edgeType = (fromType === 'queue') ? 'async' : 'sync';
+
+    const id = generateId('edge');
+    state.edges[id] = {
+        id,
+        from: fromId,
+        to:   toId,
+        type: edgeType,
+        trafficShare: 1.0,
+        config: {},
+    };
+
+    renderAll();
+    selectNode(id, 'edge');
+    setStatus(`Conexão criada (${edgeType}).`, 'success');
+}
+
+function cancelConnecting() {
+    if (!state.connecting) return;
+    document.removeEventListener('mousemove', state.connecting._onMouseMove);
+    document.getElementById('pending-edge')?.remove();
+    state.connecting = null;
+    svgCanvas.style.cursor = '';
+    setStatus('Conexão cancelada.', 'warn');
+    renderAll();
 }
 
 // ─── Selection ────────────────────────────────────────────────────────────────
@@ -216,6 +318,7 @@ function deselectAll() {
 
 function showProperties(id, type) {
     const panel = document.getElementById('properties-panel');
+
     if (type === 'node') {
         const node = state.nodes[id];
         if (!node) return;
@@ -232,6 +335,44 @@ function showProperties(id, type) {
             renderNode(node);
         });
         document.getElementById('btn-delete-node').addEventListener('click', () => deleteSelected());
+
+    } else if (type === 'edge') {
+        const edge = state.edges[id];
+        if (!edge) return;
+        const fromLabel = state.nodes[edge.from]?.label || edge.from;
+        const toLabel   = state.nodes[edge.to]?.label   || edge.to;
+        panel.innerHTML = `
+            <p class="prop-section-title">Conexão</p>
+            <p class="prop-type-badge" style="margin-bottom:10px">
+                <strong>${fromLabel}</strong> → <strong>${toLabel}</strong>
+            </p>
+            <label class="prop-label">Tipo</label>
+            <select id="prop-edge-type" class="prop-input">
+                <option value="sync"  ${edge.type === 'sync'  ? 'selected' : ''}>Síncrono (Request/Response)</option>
+                <option value="async" ${edge.type === 'async' ? 'selected' : ''}>Assíncrono (Pub/Sub)</option>
+            </select>
+            <label class="prop-label">Traffic Share (0.0 – 1.0)</label>
+            <input id="prop-traffic" type="number" class="prop-input"
+                   min="0" max="1" step="0.1" value="${edge.trafficShare}"/>
+            <label class="prop-label">Latência por aresta (ms)</label>
+            <input id="prop-edge-latency" type="number" class="prop-input"
+                   min="0" step="1" value="${edge.config.latencyMs ?? ''}"/>
+            <hr class="prop-divider"/>
+            <button id="btn-delete-edge" class="btn-danger">Remover conexão</button>
+        `;
+        document.getElementById('prop-edge-type').addEventListener('change', e => {
+            edge.type = e.target.value;
+            renderEdges();
+        });
+        document.getElementById('prop-traffic').addEventListener('input', e => {
+            edge.trafficShare = parseFloat(e.target.value) || 1.0;
+        });
+        document.getElementById('prop-edge-latency').addEventListener('input', e => {
+            const v = parseFloat(e.target.value);
+            if (!isNaN(v)) edge.config.latencyMs = v;
+            else delete edge.config.latencyMs;
+        });
+        document.getElementById('btn-delete-edge').addEventListener('click', () => deleteSelected());
     }
 }
 
@@ -266,9 +407,7 @@ document.querySelectorAll('.palette-item').forEach(item => {
         e.dataTransfer.effectAllowed = 'copy';
         item.classList.add('dragging');
     });
-    item.addEventListener('dragend', () => {
-        item.classList.remove('dragging');
-    });
+    item.addEventListener('dragend', () => item.classList.remove('dragging'));
 });
 
 // ─── Drop on Canvas ───────────────────────────────────────────────────────────
@@ -291,7 +430,7 @@ const svgCanvas = document.getElementById('canvas');
         const rect = svgCanvas.getBoundingClientRect();
         const x = e.clientX - rect.left - NODE_W / 2;
         const y = e.clientY - rect.top  - NODE_H / 2;
-        const id = generateId();
+        const id = generateId('node');
 
         const existingCount = Object.values(state.nodes).filter(n => n.type === type).length;
 
@@ -310,22 +449,30 @@ const svgCanvas = document.getElementById('canvas');
     });
 });
 
-// ─── Click canvas background = deselect ──────────────────────────────────────
+// ─── Canvas click = deselect / cancel connecting ──────────────────────────────
 
 svgCanvas.addEventListener('click', e => {
-    if (e.target === svgCanvas) deselectAll();
+    if (e.target === svgCanvas) {
+        if (state.connecting) cancelConnecting();
+        else deselectAll();
+    }
 });
 
-// ─── Keyboard: Delete ─────────────────────────────────────────────────────────
+// ─── Keyboard ─────────────────────────────────────────────────────────────────
 
 document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+        cancelConnecting();
+        return;
+    }
     if ((e.key === 'Delete' || e.key === 'Backspace') &&
-        document.activeElement.tagName !== 'INPUT') {
+        document.activeElement.tagName !== 'INPUT' &&
+        document.activeElement.tagName !== 'SELECT') {
         deleteSelected();
     }
 });
 
-// ─── Toolbar buttons ──────────────────────────────────────────────────────────
+// ─── Toolbar ──────────────────────────────────────────────────────────────────
 
 document.getElementById('btn-new').addEventListener('click', () => {
     if (Object.keys(state.nodes).length === 0) return;
