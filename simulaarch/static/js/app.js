@@ -316,24 +316,146 @@ function deselectAll() {
 
 // ─── Properties Panel ─────────────────────────────────────────────────────────
 
+// ─── Properties Panel ─────────────────────────────────────────────────────────
+
+function fieldHTML(id, label, value, type = 'number', { min = 0, step = 1, isFloat = false } = {}) {
+    return `
+        <label class="prop-label">${label}</label>
+        <input id="${id}" type="${type}" class="prop-input"
+               value="${value}" min="${min}" step="${isFloat ? 0.01 : step}"/>
+    `;
+}
+
+function bindConfig(inputId, node, key, { isFloat = false, isInt = false } = {}) {
+    const el = document.getElementById(inputId);
+    if (!el) return;
+    el.addEventListener('input', e => {
+        const raw = e.target.value;
+        let val = isFloat ? parseFloat(raw) : parseInt(raw, 10);
+        if (isNaN(val) || val < 0) { e.target.classList.add('input-error'); return; }
+        e.target.classList.remove('input-error');
+        node.config[key] = val;
+    });
+}
+
+function configFieldsHTML(node) {
+    const c = node.config;
+    switch (node.type) {
+        case 'client':
+            return `
+                <p class="prop-section-title" style="margin-top:12px">Configuração</p>
+                ${fieldHTML('cfg-rps',         'RPS (req/s)',              c.rps         ?? 100)}
+                ${fieldHTML('cfg-payload',     'Payload Size (KB)',        c.payloadSizeKB ?? 1, 'number', { isFloat: true })}
+                ${fieldHTML('cfg-concurrency', 'Concurrency (conexões)',   c.concurrency ?? 10)}
+            `;
+        case 'gateway':
+            return `
+                <p class="prop-section-title" style="margin-top:12px">Configuração</p>
+                ${fieldHTML('cfg-ratelimit',  'Rate Limit RPS',      c.rateLimitRPS     ?? 500)}
+                ${fieldHTML('cfg-latency-oh', 'Latency Overhead (ms)', c.latencyOverheadMs ?? 5)}
+            `;
+        case 'service':
+            return `
+                <p class="prop-section-title" style="margin-top:12px">Configuração</p>
+                ${fieldHTML('cfg-cpu',         'CPU Cores',            c.cpuCores      ?? 2)}
+                ${fieldHTML('cfg-ram',         'RAM (GB)',              c.ramGB         ?? 2)}
+                ${fieldHTML('cfg-processtime', 'Process Time (ms)',     c.processTimeMs ?? 50)}
+                <p class="prop-hint">MaxRPS teórico: <strong id="derived-maxrps">—</strong></p>
+            `;
+        case 'queue':
+            return `
+                <p class="prop-section-title" style="margin-top:12px">Configuração</p>
+                ${fieldHTML('cfg-throughput',    'Throughput Max (msgs/s)', c.throughputMaxMsgsPerSec ?? 1000)}
+                ${fieldHTML('cfg-write-latency', 'Write Latency (ms)',      c.writeLatencyMs          ?? 2)}
+            `;
+        case 'cluster':
+            return `
+                <p class="prop-section-title" style="margin-top:12px">Configuração</p>
+                ${fieldHTML('cfg-min-replicas', 'Min Replicas',       c.minReplicas  ?? 1)}
+                ${fieldHTML('cfg-max-replicas', 'Max Replicas',       c.maxReplicas  ?? 5)}
+                ${fieldHTML('cfg-hpa',          'HPA Threshold (0–1)', c.hpaThreshold ?? 0.7, 'number', { isFloat: true })}
+            `;
+        default: return '';
+    }
+}
+
+function bindConfigFields(node) {
+    switch (node.type) {
+        case 'client':
+            bindConfig('cfg-rps',         node, 'rps');
+            bindConfig('cfg-payload',     node, 'payloadSizeKB', { isFloat: true });
+            bindConfig('cfg-concurrency', node, 'concurrency');
+            break;
+        case 'gateway':
+            bindConfig('cfg-ratelimit',  node, 'rateLimitRPS');
+            bindConfig('cfg-latency-oh', node, 'latencyOverheadMs');
+            break;
+        case 'service':
+            bindConfig('cfg-cpu',         node, 'cpuCores');
+            bindConfig('cfg-ram',         node, 'ramGB');
+            bindConfig('cfg-processtime', node, 'processTimeMs');
+            ['cfg-cpu', 'cfg-processtime'].forEach(id => {
+                document.getElementById(id)?.addEventListener('input', () => {
+                    const cores = parseFloat(document.getElementById('cfg-cpu')?.value) || node.config.cpuCores;
+                    const pt    = parseFloat(document.getElementById('cfg-processtime')?.value) || node.config.processTimeMs;
+                    const maxRPS = pt > 0 ? ((1000 * cores) / pt).toFixed(1) : '—';
+                    const el = document.getElementById('derived-maxrps');
+                    if (el) el.textContent = maxRPS + ' RPS';
+                });
+            });
+            const initCores = node.config.cpuCores || 2;
+            const initPt    = node.config.processTimeMs || 50;
+            const initMax   = initPt > 0 ? ((1000 * initCores) / initPt).toFixed(1) : '—';
+            const maxEl = document.getElementById('derived-maxrps');
+            if (maxEl) maxEl.textContent = initMax + ' RPS';
+            break;
+        case 'queue':
+            bindConfig('cfg-throughput',    node, 'throughputMaxMsgsPerSec');
+            bindConfig('cfg-write-latency', node, 'writeLatencyMs');
+            break;
+        case 'cluster':
+            bindConfig('cfg-min-replicas', node, 'minReplicas');
+            bindConfig('cfg-max-replicas', node, 'maxReplicas');
+            bindConfig('cfg-hpa',          node, 'hpaThreshold', { isFloat: true });
+            break;
+    }
+}
+
 function showProperties(id, type) {
     const panel = document.getElementById('properties-panel');
 
     if (type === 'node') {
         const node = state.nodes[id];
         if (!node) return;
+
         panel.innerHTML = `
             <p class="prop-section-title">Propriedades</p>
+
             <label class="prop-label">Nome</label>
-            <input id="prop-label" type="text" class="prop-input" value="${node.label}"/>
+            <input id="prop-label-input" type="text" class="prop-input" value="${node.label}"/>
+
             <p class="prop-type-badge">Tipo: <strong>${NODE_LABELS[node.type]}</strong></p>
+
+            ${configFieldsHTML(node)}
+
+            <hr class="prop-divider"/>
+
+            <p class="prop-section-title">Resultado da Simulação</p>
+            <div id="sim-result-panel" class="sim-result-empty">
+                <span>Execute a simulação para ver as métricas deste nó.</span>
+            </div>
+
             <hr class="prop-divider"/>
             <button id="btn-delete-node" class="btn-danger">Remover nó</button>
         `;
-        document.getElementById('prop-label').addEventListener('input', e => {
+
+        document.getElementById('prop-label-input').addEventListener('input', e => {
             node.label = e.target.value;
             renderNode(node);
         });
+
+        bindConfigFields(node);
+
         document.getElementById('btn-delete-node').addEventListener('click', () => deleteSelected());
 
     } else if (type === 'edge') {
@@ -341,35 +463,42 @@ function showProperties(id, type) {
         if (!edge) return;
         const fromLabel = state.nodes[edge.from]?.label || edge.from;
         const toLabel   = state.nodes[edge.to]?.label   || edge.to;
+
         panel.innerHTML = `
             <p class="prop-section-title">Conexão</p>
             <p class="prop-type-badge" style="margin-bottom:10px">
                 <strong>${fromLabel}</strong> → <strong>${toLabel}</strong>
             </p>
+
             <label class="prop-label">Tipo</label>
             <select id="prop-edge-type" class="prop-input">
                 <option value="sync"  ${edge.type === 'sync'  ? 'selected' : ''}>Síncrono (Request/Response)</option>
                 <option value="async" ${edge.type === 'async' ? 'selected' : ''}>Assíncrono (Pub/Sub)</option>
             </select>
+
             <label class="prop-label">Traffic Share (0.0 – 1.0)</label>
             <input id="prop-traffic" type="number" class="prop-input"
                    min="0" max="1" step="0.1" value="${edge.trafficShare}"/>
+
             <label class="prop-label">Latência por aresta (ms)</label>
             <input id="prop-edge-latency" type="number" class="prop-input"
                    min="0" step="1" value="${edge.config.latencyMs ?? ''}"/>
+
             <hr class="prop-divider"/>
             <button id="btn-delete-edge" class="btn-danger">Remover conexão</button>
         `;
+
         document.getElementById('prop-edge-type').addEventListener('change', e => {
             edge.type = e.target.value;
             renderEdges();
         });
         document.getElementById('prop-traffic').addEventListener('input', e => {
-            edge.trafficShare = parseFloat(e.target.value) || 1.0;
+            const v = parseFloat(e.target.value);
+            if (!isNaN(v) && v >= 0 && v <= 1) edge.trafficShare = v;
         });
         document.getElementById('prop-edge-latency').addEventListener('input', e => {
             const v = parseFloat(e.target.value);
-            if (!isNaN(v)) edge.config.latencyMs = v;
+            if (!isNaN(v) && v >= 0) edge.config.latencyMs = v;
             else delete edge.config.latencyMs;
         });
         document.getElementById('btn-delete-edge').addEventListener('click', () => deleteSelected());
