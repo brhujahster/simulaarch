@@ -13,20 +13,98 @@
             <button id="btn-new">Novo</button>
             <button id="btn-clear">Limpar</button>
             <button id="btn-import">Importar JSON</button>
+            <input type="file" id="file-input" accept=".json" style="display:none">
             <button id="btn-export">Exportar JSON</button>
             <button id="btn-simulate">▶ Rodar Simulação</button>
         </div>
     </header>
     <main id="workspace">
-        <aside id="palette"></aside>
+        <aside id="palette">
+            <p class="palette-title">Componentes</p>
+
+            <div class="palette-item" draggable="true" data-type="client"
+                 title="Client: gera carga de entrada (RPS, Payload, Concurrency)">
+                <svg class="palette-icon" viewBox="0 0 32 32">
+                    <rect x="4" y="8" width="24" height="16" rx="3" fill="#89b4fa"/>
+                    <rect x="10" y="24" width="12" height="3" rx="1" fill="#89b4fa"/>
+                    <rect x="7" y="27" width="18" height="2" rx="1" fill="#89b4fa"/>
+                    <rect x="6" y="10" width="20" height="11" rx="1" fill="#1e1e2e"/>
+                    <circle cx="16" cy="15" r="3" fill="#89b4fa"/>
+                </svg>
+                <span>Client</span>
+            </div>
+
+            <div class="palette-item" draggable="true" data-type="gateway"
+                 title="API Gateway: controla rate limit e adiciona latência overhead">
+                <svg class="palette-icon" viewBox="0 0 32 32">
+                    <polygon points="16,3 29,10 29,22 16,29 3,22 3,10" fill="#cba6f7"/>
+                    <polygon points="16,7 25,12 25,20 16,25 7,20 7,12" fill="#1e1e2e"/>
+                    <text x="16" y="20" text-anchor="middle" fill="#cba6f7" font-size="9" font-weight="bold">GW</text>
+                </svg>
+                <span>API Gateway</span>
+            </div>
+
+            <div class="palette-item" draggable="true" data-type="service"
+                 title="Service: microsserviço com CPU, RAM e tempo de processamento">
+                <svg class="palette-icon" viewBox="0 0 32 32">
+                    <rect x="4" y="4" width="24" height="24" rx="4" fill="#a6e3a1"/>
+                    <rect x="8" y="8" width="16" height="16" rx="2" fill="#1e1e2e"/>
+                    <rect x="11" y="11" width="4" height="4" rx="1" fill="#a6e3a1"/>
+                    <rect x="17" y="11" width="4" height="4" rx="1" fill="#a6e3a1"/>
+                    <rect x="11" y="17" width="10" height="2" rx="1" fill="#a6e3a1"/>
+                </svg>
+                <span>Service</span>
+            </div>
+
+            <div class="palette-item" draggable="true" data-type="queue"
+                 title="Queue: fila de mensagens (Kafka/RabbitMQ) com throughput e lag">
+                <svg class="palette-icon" viewBox="0 0 32 32">
+                    <ellipse cx="16" cy="9" rx="12" ry="5" fill="#fab387"/>
+                    <rect x="4" y="9" width="24" height="14" fill="#fab387"/>
+                    <ellipse cx="16" cy="23" rx="12" ry="5" fill="#f9a87a"/>
+                    <ellipse cx="16" cy="9" rx="12" ry="5" fill="#fab387"/>
+                    <ellipse cx="16" cy="9" rx="8" ry="3" fill="#1e1e2e"/>
+                </svg>
+                <span>Queue</span>
+            </div>
+
+            <div class="palette-item" draggable="true" data-type="cluster"
+                 title="K8s Cluster: escalonamento horizontal com HPA e réplicas">
+                <svg class="palette-icon" viewBox="0 0 32 32">
+                    <rect x="2" y="2" width="28" height="28" rx="4" fill="none" stroke="#94e2d5" stroke-width="2" stroke-dasharray="4,2"/>
+                    <circle cx="10" cy="12" r="4" fill="#94e2d5"/>
+                    <circle cx="22" cy="12" r="4" fill="#94e2d5"/>
+                    <circle cx="16" cy="22" r="4" fill="#94e2d5"/>
+                    <line x1="10" y1="12" x2="22" y2="12" stroke="#94e2d5" stroke-width="1.5"/>
+                    <line x1="10" y1="12" x2="16" y2="22" stroke="#94e2d5" stroke-width="1.5"/>
+                    <line x1="22" y1="12" x2="16" y2="22" stroke="#94e2d5" stroke-width="1.5"/>
+                </svg>
+                <span>K8s Cluster</span>
+            </div>
+        </aside>
+
         <section id="canvas-container">
-            <svg id="canvas"></svg>
+            <svg id="canvas">
+                <defs>
+                    <marker id="arrowhead" markerWidth="10" markerHeight="7"
+                            refX="9" refY="3.5" orient="auto">
+                        <polygon points="0 0, 10 3.5, 0 7" fill="#585b70"/>
+                    </marker>
+                    <marker id="arrowhead-async" markerWidth="10" markerHeight="7"
+                            refX="9" refY="3.5" orient="auto">
+                        <polygon points="0 0, 10 3.5, 0 7" fill="#fab387"/>
+                    </marker>
+                </defs>
+                <g id="edges-layer"></g>
+                <g id="nodes-layer"></g>
+            </svg>
         </section>
+
         <aside id="properties-panel">
             <p id="properties-placeholder">Selecione um componente</p>
         </aside>
     </main>
-    <footer id="statusbar">Pronto</footer>
+    <footer id="statusbar"><span id="status-text">Pronto</span></footer>
     <script src="/static/js/app.js"></script>
 </body>
 </html>
