@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SimulaArch</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header id="topbar">
+        <span id="app-title">SimulaArch</span>
+        <div id="topbar-actions">
+            <button id="btn-new">Novo</button>
+            <button id="btn-clear">Limpar</button>
+            <button id="btn-import">Importar JSON</button>
+            <button id="btn-export">Exportar JSON</button>
+            <button id="btn-simulate">▶ Rodar Simulação</button>
+        </div>
+    </header>
+    <main id="workspace">
+        <aside id="palette"></aside>
+        <section id="canvas-container">
+            <svg id="canvas"></svg>
+        </section>
+        <aside id="properties-panel">
+            <p id="properties-placeholder">Selecione um componente</p>
+        </aside>
+    </main>
+    <footer id="statusbar">Pronto</footer>
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
