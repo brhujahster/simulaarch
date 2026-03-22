@@ -1,0 +1,114 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    font-family: 'Segoe UI', sans-serif;
+    font-size: 14px;
+    background: #1e1e2e;
+    color: #cdd6f4;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+}
+
+#topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #181825;
+    padding: 8px 16px;
+    border-bottom: 1px solid #313244;
+    height: 48px;
+    flex-shrink: 0;
+}
+
+#app-title {
+    font-weight: 700;
+    font-size: 16px;
+    color: #cba6f7;
+}
+
+#topbar-actions {
+    display: flex;
+    gap: 8px;
+}
+
+#topbar-actions button {
+    padding: 6px 12px;
+    border: 1px solid #45475a;
+    background: #313244;
+    color: #cdd6f4;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+#topbar-actions button:hover { background: #45475a; }
+
+#btn-simulate {
+    background: #a6e3a1 !important;
+    color: #1e1e2e !important;
+    border-color: #a6e3a1 !important;
+    font-weight: 600;
+}
+
+#btn-simulate:hover { background: #94d68e !important; }
+
+#workspace {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+#palette {
+    width: 160px;
+    background: #181825;
+    border-right: 1px solid #313244;
+    padding: 12px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    overflow-y: auto;
+    flex-shrink: 0;
+}
+
+#canvas-container {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    background: #1e1e2e;
+    background-image:
+        radial-gradient(circle, #313244 1px, transparent 1px);
+    background-size: 24px 24px;
+}
+
+#canvas {
+    width: 100%;
+    height: 100%;
+}
+
+#properties-panel {
+    width: 240px;
+    background: #181825;
+    border-left: 1px solid #313244;
+    padding: 12px;
+    overflow-y: auto;
+    flex-shrink: 0;
+}
+
+#properties-placeholder {
+    color: #585b70;
+    font-style: italic;
+    text-align: center;
+    margin-top: 40px;
+}
+
+#statusbar {
+    height: 28px;
+    background: #181825;
+    border-top: 1px solid #313244;
+    padding: 4px 16px;
+    font-size: 12px;
+    color: #585b70;
+    flex-shrink: 0;
+}
