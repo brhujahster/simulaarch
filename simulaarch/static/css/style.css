@@ -41,6 +41,7 @@ body {
     border-radius: 6px;
     cursor: pointer;
     font-size: 13px;
+    transition: background 0.15s;
 }
 
 #topbar-actions button:hover { background: #45475a; }
@@ -104,8 +105,10 @@ body {
 }
 
 .palette-item:active { cursor: grabbing; }
-
 .palette-item.dragging { opacity: 0.4; }
+
+.palette-item .palette-icon { pointer-events: none; }
+.palette-item span { pointer-events: none; }
 
 .palette-icon {
     width: 36px;
@@ -124,6 +127,7 @@ body {
 #canvas {
     width: 100%;
     height: 100%;
+    display: block;
 }
 
 #properties-panel {
@@ -142,6 +146,63 @@ body {
     margin-top: 40px;
 }
 
+.prop-section-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #585b70;
+    margin-bottom: 10px;
+}
+
+.prop-label {
+    display: block;
+    font-size: 12px;
+    color: #a6adc8;
+    margin-bottom: 4px;
+}
+
+.prop-input {
+    width: 100%;
+    margin-bottom: 12px;
+    padding: 6px 8px;
+    background: #313244;
+    border: 1px solid #45475a;
+    border-radius: 6px;
+    color: #cdd6f4;
+    font-size: 13px;
+    outline: none;
+}
+
+.prop-input:focus { border-color: #cba6f7; }
+
+.prop-type-badge {
+    font-size: 12px;
+    color: #585b70;
+}
+
+.prop-type-badge strong { color: #cdd6f4; }
+
+.prop-divider {
+    border: none;
+    border-top: 1px solid #313244;
+    margin: 12px 0;
+}
+
+.btn-danger {
+    width: 100%;
+    padding: 7px;
+    background: #f38ba8;
+    color: #1e1e2e;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 13px;
+    transition: background 0.15s;
+}
+
+.btn-danger:hover { background: #eb6f8e; }
+
 #statusbar {
     height: 28px;
     background: #181825;
@@ -152,6 +213,6 @@ body {
     flex-shrink: 0;
 }
 
-#status-text.error { color: #f38ba8; }
+#status-text.error   { color: #f38ba8; }
 #status-text.success { color: #a6e3a1; }
-#status-text.warn { color: #f9e2af; }
+#status-text.warn    { color: #f9e2af; }
