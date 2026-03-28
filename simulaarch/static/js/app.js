@@ -709,12 +709,113 @@ document.getElementById('btn-simulate').addEventListener('click', () => {
     setStatus('Simulação ainda não implementada.', 'warn');
 });
 
-document.getElementById('btn-export').addEventListener('click', () => {
-    setStatus('Exportação ainda não implementada.', 'warn');
-});
+// ─── Export / Import JSON ─────────────────────────────────────────────────────
+
+function exportJSON() {
+    const payload = {
+        nodes: Object.values(state.nodes).map(n => ({
+            id:     n.id,
+            type:   n.type,
+            label:  n.label,
+            x:      n.x,
+            y:      n.y,
+            config: { ...n.config },
+        })),
+        edges: Object.values(state.edges).map(e => ({
+            id:           e.id,
+            from:         e.from,
+            to:           e.to,
+            type:         e.type,
+            trafficShare: e.trafficShare,
+            config:       { ...e.config },
+        })),
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = 'simulaarch.json';
+    a.click();
+    URL.revokeObjectURL(url);
+    setStatus('Diagrama exportado como simulaarch.json.', 'success');
+}
+
+function importJSON(file) {
+    if (!file) return;
+    if (!file.name.endsWith('.json')) {
+        setStatus('Erro: selecione um arquivo .json válido.', 'error');
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = e => {
+        let data;
+        try {
+            data = JSON.parse(e.target.result);
+        } catch {
+            setStatus('Erro: arquivo JSON inválido ou malformado.', 'error');
+            return;
+        }
+
+        // Validação mínima da estrutura
+        if (!Array.isArray(data.nodes) || !Array.isArray(data.edges)) {
+            setStatus('Erro: JSON não contém "nodes" e "edges" válidos.', 'error');
+            return;
+        }
+        for (const n of data.nodes) {
+            if (!n.id || !n.type) {
+                setStatus('Erro: nó sem "id" ou "type" no JSON importado.', 'error');
+                return;
+            }
+        }
+        for (const ed of data.edges) {
+            if (!ed.id || !ed.from || !ed.to) {
+                setStatus('Erro: aresta sem "id", "from" ou "to" no JSON importado.', 'error');
+                return;
+            }
+        }
+
+        // Restaura state (sem resultado de simulação anterior)
+        Object.keys(state.nodes).forEach(k => delete state.nodes[k]);
+        Object.keys(state.edges).forEach(k => delete state.edges[k]);
+
+        data.nodes.forEach(n => {
+            state.nodes[n.id] = {
+                id:     n.id,
+                type:   n.type,
+                label:  n.label  || NODE_LABELS[n.type] || n.type,
+                x:      n.x      ?? 100,
+                y:      n.y      ?? 100,
+                config: n.config  || getDefaultConfig(n.type),
+            };
+        });
+        data.edges.forEach(ed => {
+            state.edges[ed.id] = {
+                id:           ed.id,
+                from:         ed.from,
+                to:           ed.to,
+                type:         ed.type         || 'sync',
+                trafficShare: ed.trafficShare  ?? 1.0,
+                config:       ed.config        || {},
+            };
+        });
+
+        deselectAll();
+        setStatus(`Importado: ${data.nodes.length} nó(s), ${data.edges.length} conexão(ões).`, 'success');
+    };
+    reader.readAsText(file);
+}
+
+document.getElementById('btn-export').addEventListener('click', exportJSON);
 
 document.getElementById('btn-import').addEventListener('click', () => {
     document.getElementById('file-input').click();
+});
+
+document.getElementById('file-input').addEventListener('change', e => {
+    importJSON(e.target.files[0]);
+    e.target.value = ''; // reset para permitir reimportar o mesmo arquivo
 });
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
