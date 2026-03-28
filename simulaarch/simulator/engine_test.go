@@ -343,8 +343,10 @@ func TestClusterNodeAloneIsAccepted(t *testing.T) {
 }
 
 func TestClusterWithAssociatedServiceInPayload(t *testing.T) {
-	// Service com clusterRef no config não deve quebrar o motor
-	// (associação é frontend-only por enquanto; o motor ignora clusterRef)
+	// Service com clusterRef: HPA deve escalar para absorver a carga.
+	// MaxRPS/replica=(1000*2)/25=80. RPS=80. HPA=0.7. MinReplicas=2. MaxReplicas=10.
+	// singleUtil=1.0 → needed=ceil(1.0/0.7)=2 → actualReplicas=max(2,2)=2
+	// effectiveMaxRPS=160 → util=0.5 → OK
 	arch := models.Architecture{
 		Nodes: []models.Node{
 			node("c1", "client", map[string]interface{}{"RPS": 80.0}),
@@ -375,12 +377,14 @@ func TestClusterWithAssociatedServiceInPayload(t *testing.T) {
 	}
 
 	s1, _ := findNode(res, "s1")
-	// MaxRPS = (1000*2)/25 = 80 → util = 1.0 → CRITICAL
-	if s1.Status != models.StatusCritical {
-		t.Errorf("esperava CRITICAL (util=1.0), obteve %s", s1.Status)
+	if s1.Status != models.StatusOK {
+		t.Errorf("esperava OK (HPA escalou para 2 réplicas), obteve %s", s1.Status)
 	}
 	if s1.EffectiveRPS != 80 {
 		t.Errorf("effectiveRPS esperado 80, obteve %.1f", s1.EffectiveRPS)
+	}
+	if replicas := s1.Metrics["replicas"].(float64); replicas != 2 {
+		t.Errorf("replicas esperado 2, obteve %.0f", replicas)
 	}
 }
 
@@ -430,7 +434,9 @@ func TestClusterGatewayServiceChain(t *testing.T) {
 }
 
 func TestMultipleClustersIndependent(t *testing.T) {
-	// Dois clusters independentes não interferem entre si
+	// Dois clusters independentes não interferem entre si; HPA escala cada um.
+	// sa: MaxRPS/rep=40, RPS=50, HPA=0.7 → needed=ceil(1.25/0.7)=2 → util=50/80=0.625 → OK
+	// sb: MaxRPS/rep=100, RPS=200, HPA=0.6 → needed=ceil(2.0/0.6)=4 → util=200/400=0.5 → OK
 	arch := models.Architecture{
 		Nodes: []models.Node{
 			node("c1", "client", map[string]interface{}{"RPS": 50.0}),
@@ -456,12 +462,358 @@ func TestMultipleClustersIndependent(t *testing.T) {
 	sa, _ := findNode(res, "sa")
 	sb, _ := findNode(res, "sb")
 
-	// sa: MaxRPS=(1000*2)/50=40, util=50/40=1.25 → CRITICAL
-	if sa.Status != models.StatusCritical {
-		t.Errorf("sa esperado CRITICAL, obteve %s", sa.Status)
+	if sa.Status != models.StatusOK {
+		t.Errorf("sa: HPA escalou para 2 réplicas, esperava OK, obteve %s", sa.Status)
 	}
-	// sb: MaxRPS=(1000*1)/10=100, util=200/100=2.0 → CRITICAL
-	if sb.Status != models.StatusCritical {
-		t.Errorf("sb esperado CRITICAL, obteve %s", sb.Status)
+	if saRep := sa.Metrics["replicas"].(float64); saRep != 2 {
+		t.Errorf("sa: esperava 2 réplicas, obteve %.0f", saRep)
+	}
+
+	if sb.Status != models.StatusOK {
+		t.Errorf("sb: HPA escalou para 4 réplicas, esperava OK, obteve %s", sb.Status)
+	}
+	if sbRep := sb.Metrics["replicas"].(float64); sbRep != 4 {
+		t.Errorf("sb: esperava 4 réplicas, obteve %.0f", sbRep)
+	}
+}
+
+// ─── Testes de Queue assíncrona e K8s HPA (task 3.3) ─────────────────────────
+
+func TestQueueRateLimit(t *testing.T) {
+	// Queue com throughput menor que o ingress deve limitar egress e gerar lag
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 800.0}),
+			node("q1", "queue", map[string]interface{}{
+				"ThroughputMaxMsgsPerSec": 500.0,
+				"WriteLatencyMs":          3.0,
+			}),
+		},
+		Edges: []models.Edge{edge("e1", "c1", "q1", 1.0)},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	q, _ := findNode(res, "q1")
+	// egressRPS = min(800, 500) = 500
+	if q.EffectiveRPS != 500 {
+		t.Errorf("egressRPS esperado 500, obteve %.1f", q.EffectiveRPS)
+	}
+	// utilização = 800/500 = 1.6 → CRITICAL
+	if q.Status != models.StatusCritical {
+		t.Errorf("queue deveria ser CRITICAL, obteve %s", q.Status)
+	}
+	// metrics deve conter lagEst = 800-500 = 300
+	if q.Metrics == nil {
+		t.Fatal("queue deve ter metrics")
+	}
+	if lag, ok := q.Metrics["lagEst"].(float64); !ok || lag != 300 {
+		t.Errorf("lagEst esperado 300, obteve %v", q.Metrics["lagEst"])
+	}
+	if ing, ok := q.Metrics["ingressRPS"].(float64); !ok || ing != 800 {
+		t.Errorf("ingressRPS esperado 800, obteve %v", q.Metrics["ingressRPS"])
+	}
+}
+
+func TestQueueUnderCapacityNoLag(t *testing.T) {
+	// Queue com ingress < throughput: egressRPS = ingressRPS, lagEst = 0
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 200.0}),
+			node("q1", "queue", map[string]interface{}{
+				"ThroughputMaxMsgsPerSec": 1000.0,
+				"WriteLatencyMs":          2.0,
+			}),
+		},
+		Edges: []models.Edge{edge("e1", "c1", "q1", 1.0)},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	q, _ := findNode(res, "q1")
+	if q.EffectiveRPS != 200 {
+		t.Errorf("egressRPS esperado 200, obteve %.1f", q.EffectiveRPS)
+	}
+	if q.Status != models.StatusOK {
+		t.Errorf("queue 20%% utilização deveria ser OK, obteve %s", q.Status)
+	}
+	if lag := q.Metrics["lagEst"].(float64); lag != 0 {
+		t.Errorf("lagEst esperado 0, obteve %.1f", lag)
+	}
+}
+
+func TestQueueAsyncLatencyBarrier(t *testing.T) {
+	// A latência downstream de uma queue deve ser independente da upstream.
+	// Client(upstream pesado) → Queue(writeLatency=5ms) → Service(10ms)
+	// Latência do service deve ser 5+10=15ms, NÃO acumular latência do client.
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 50.0}),
+			node("gw", "apigateway", map[string]interface{}{
+				"RateLimitRPS":      1000.0,
+				"LatencyOverheadMs": 50.0, // latência pesada upstream
+			}),
+			node("q1", "queue", map[string]interface{}{
+				"ThroughputMaxMsgsPerSec": 1000.0,
+				"WriteLatencyMs":          5.0,
+			}),
+			node("s1", "service", map[string]interface{}{
+				"CPU_Cores":     2.0,
+				"ProcessTimeMs": 10.0,
+			}),
+		},
+		Edges: []models.Edge{
+			edge("e1", "c1", "gw", 1.0),
+			edge("e2", "gw", "q1", 1.0),
+			edge("e3", "q1", "s1", 1.0),
+		},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	q, _ := findNode(res, "q1")
+	// Queue deve ter nodeLatency = writeLatencyMs = 5ms (barreira)
+	if q.LatencyMs != 5 {
+		t.Errorf("queue latencyMs esperado 5 (barreira async), obteve %.1f", q.LatencyMs)
+	}
+
+	s1, _ := findNode(res, "s1")
+	// Latência do service = queue(5ms) + processTime(10ms) = 15ms
+	// Sem a barreira seria: client(0) + gateway(50ms) + queue(5ms) + service(10ms) = 65ms
+	if s1.LatencyMs != 15 {
+		t.Errorf("service latencyMs esperado 15 (barreira async), obteve %.1f", s1.LatencyMs)
+	}
+}
+
+func TestQueueMultipleProducers(t *testing.T) {
+	// Dois clients enviam para a mesma queue: IngressRPS = soma
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 300.0}),
+			node("c2", "client", map[string]interface{}{"RPS": 200.0}),
+			node("q1", "queue", map[string]interface{}{
+				"ThroughputMaxMsgsPerSec": 400.0,
+				"WriteLatencyMs":          1.0,
+			}),
+		},
+		Edges: []models.Edge{
+			edge("e1", "c1", "q1", 1.0),
+			edge("e2", "c2", "q1", 1.0),
+		},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	q, _ := findNode(res, "q1")
+	// ingressRPS = 300+200 = 500, egressRPS = min(500,400) = 400
+	if q.EffectiveRPS != 400 {
+		t.Errorf("egressRPS esperado 400, obteve %.1f", q.EffectiveRPS)
+	}
+	if ing := q.Metrics["ingressRPS"].(float64); ing != 500 {
+		t.Errorf("ingressRPS esperado 500, obteve %.1f", ing)
+	}
+	if lag := q.Metrics["lagEst"].(float64); lag != 100 {
+		t.Errorf("lagEst esperado 100, obteve %.1f", lag)
+	}
+	// utilização = 500/400 = 1.25 → CRITICAL
+	if q.Status != models.StatusCritical {
+		t.Errorf("queue deveria ser CRITICAL, obteve %s", q.Status)
+	}
+}
+
+func TestK8sHPAScaleUp(t *testing.T) {
+	// Service com 1 réplica seria CRITICAL, HPA deve escalar para atender
+	// MaxRPS/réplica = (1000*1)/10 = 100. RPS = 250. HPA_Threshold = 0.7.
+	// needed = ceil((250/100) / 0.7) = ceil(2.5/0.7) = ceil(3.57) = 4 réplicas
+	// MaxReplicas = 5 → actualReplicas = 4
+	// effectiveMaxRPS = 100 * 4 = 400 → util = 250/400 = 0.625 → OK
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 250.0}),
+			node("k1", "cluster", map[string]interface{}{
+				"MinReplicas":   1.0,
+				"MaxReplicas":   5.0,
+				"HPA_Threshold": 0.7,
+			}),
+			{
+				ID:    "s1",
+				Type:  "service",
+				Label: "s1",
+				Config: map[string]interface{}{
+					"CPU_Cores":     1.0,
+					"ProcessTimeMs": 10.0,
+					"clusterRef":    "k1",
+				},
+			},
+		},
+		Edges: []models.Edge{edge("e1", "c1", "s1", 1.0)},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	s1, _ := findNode(res, "s1")
+	if s1.Status != models.StatusOK {
+		t.Errorf("service com HPA deveria ser OK após scale-up, obteve %s", s1.Status)
+	}
+	if s1.Metrics == nil {
+		t.Fatal("service deve ter metrics de cluster")
+	}
+	if replicas := s1.Metrics["replicas"].(float64); replicas != 4 {
+		t.Errorf("replicas esperado 4, obteve %.0f", replicas)
+	}
+	if isSat := s1.Metrics["isSaturated"].(bool); isSat {
+		t.Error("isSaturated deve ser false (4 réplicas são suficientes)")
+	}
+}
+
+func TestK8sHPAMinReplicas(t *testing.T) {
+	// Tráfego baixo: HPA não deve cair abaixo do MinReplicas
+	// MaxRPS/réplica = 100. RPS = 10. HPA=0.7 → needed=ceil(0.1/0.7)=1 = MinReplicas
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 10.0}),
+			node("k1", "cluster", map[string]interface{}{
+				"MinReplicas":   2.0,
+				"MaxReplicas":   10.0,
+				"HPA_Threshold": 0.7,
+			}),
+			{
+				ID:    "s1",
+				Type:  "service",
+				Label: "s1",
+				Config: map[string]interface{}{
+					"CPU_Cores":     1.0,
+					"ProcessTimeMs": 10.0,
+					"clusterRef":    "k1",
+				},
+			},
+		},
+		Edges: []models.Edge{edge("e1", "c1", "s1", 1.0)},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	s1, _ := findNode(res, "s1")
+	// needed = ceil((10/100)/0.7) = ceil(0.143) = 1, mas MinReplicas = 2
+	if replicas := s1.Metrics["replicas"].(float64); replicas != 2 {
+		t.Errorf("replicas esperado 2 (MinReplicas), obteve %.0f", replicas)
+	}
+	if s1.Status != models.StatusOK {
+		t.Errorf("service com baixo tráfego deveria ser OK, obteve %s", s1.Status)
+	}
+}
+
+func TestK8sHPASaturationAtMaxReplicas(t *testing.T) {
+	// Tráfego tão alto que mesmo MaxReplicas não é suficiente
+	// MaxRPS/réplica = 100. RPS = 600. MaxReplicas = 4.
+	// needed = ceil((600/100)/0.7) = ceil(8.57) = 9, mas maxR=4 → actualReplicas=4
+	// effectiveMaxRPS = 400 → util = 600/400 = 1.5 → CRITICAL + isSaturated=true
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 600.0}),
+			node("k1", "cluster", map[string]interface{}{
+				"MinReplicas":   1.0,
+				"MaxReplicas":   4.0,
+				"HPA_Threshold": 0.7,
+			}),
+			{
+				ID:    "s1",
+				Type:  "service",
+				Label: "s1",
+				Config: map[string]interface{}{
+					"CPU_Cores":     1.0,
+					"ProcessTimeMs": 10.0,
+					"clusterRef":    "k1",
+				},
+			},
+		},
+		Edges: []models.Edge{edge("e1", "c1", "s1", 1.0)},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	s1, _ := findNode(res, "s1")
+	if s1.Status != models.StatusCritical {
+		t.Errorf("service saturado deveria ser CRITICAL, obteve %s", s1.Status)
+	}
+	if replicas := s1.Metrics["replicas"].(float64); replicas != 4 {
+		t.Errorf("replicas esperado 4 (MaxReplicas), obteve %.0f", replicas)
+	}
+	if isSat := s1.Metrics["isSaturated"].(bool); !isSat {
+		t.Error("isSaturated deve ser true (600 > 100*4=400)")
+	}
+}
+
+func TestMixedSyncAsyncPaths(t *testing.T) {
+	// Arquitetura com caminho síncrono e assíncrono em paralelo:
+	// Client → (sync) Service A
+	// Client → (async via Queue) Service B
+	// Ambos devem ser calculados corretamente e independentemente.
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 100.0}),
+			node("sa", "service", map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 20.0}),
+			node("q1", "queue", map[string]interface{}{
+				"ThroughputMaxMsgsPerSec": 1000.0,
+				"WriteLatencyMs":          3.0,
+			}),
+			node("sb", "service", map[string]interface{}{"CPU_Cores": 1.0, "ProcessTimeMs": 15.0}),
+		},
+		Edges: []models.Edge{
+			edge("e1", "c1", "sa", 0.6),
+			edge("e2", "c1", "q1", 0.4),
+			edge("e3", "q1", "sb", 1.0),
+		},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	sa, _ := findNode(res, "sa")
+	// sa recebe 60 RPS; MaxRPS=(1000*2)/20=100 → util=0.6 → OK; latência=20ms
+	if sa.Status != models.StatusOK {
+		t.Errorf("sa esperado OK, obteve %s", sa.Status)
+	}
+	if sa.LatencyMs != 20 {
+		t.Errorf("sa latencyMs esperado 20, obteve %.1f", sa.LatencyMs)
+	}
+
+	q, _ := findNode(res, "q1")
+	// queue recebe 40 RPS → OK; latência=3ms (barreira)
+	if q.LatencyMs != 3 {
+		t.Errorf("queue latencyMs esperado 3, obteve %.1f", q.LatencyMs)
+	}
+
+	sb, _ := findNode(res, "sb")
+	// sb recebe 40 RPS; MaxRPS=(1000*1)/15≈66.7 → util≈0.6 → OK
+	// latência = queue(3ms) + processTime(15ms) = 18ms (independente do upstream)
+	if sb.LatencyMs != 18 {
+		t.Errorf("sb latencyMs esperado 18 (3+15), obteve %.1f", sb.LatencyMs)
+	}
+	if sb.Status != models.StatusOK {
+		t.Errorf("sb esperado OK, obteve %s", sb.Status)
 	}
 }
