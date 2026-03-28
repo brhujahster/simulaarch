@@ -348,6 +348,32 @@ func TestSimulateHandlerMultiNodeFanOutTraffic(t *testing.T) {
 	}
 }
 
+func TestSimulateHandlerIgnoresExtraFieldsLikeName(t *testing.T) {
+	// O campo "name" do cenário (4.5) é salvo no JSON exportado mas não enviado ao /simulate.
+	// Este teste garante que um payload com campo extra não causa erro 400.
+	payload := map[string]interface{}{
+		"name": "Cenário de Teste",
+		"nodes": []map[string]interface{}{
+			{"id": "c1", "type": "client", "label": "Client", "x": 50.0, "y": 100.0,
+				"config": map[string]interface{}{"RPS": 50.0}},
+			{"id": "s1", "type": "service", "label": "Service", "x": 250.0, "y": 100.0,
+				"config": map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 20.0}},
+		},
+		"edges": []map[string]interface{}{
+			{"id": "e1", "from": "c1", "to": "s1", "trafficShare": 1.0, "config": map[string]interface{}{}},
+		},
+	}
+	w := post(t, payload)
+	if w.Code != http.StatusOK {
+		t.Fatalf("payload com campo 'name' deveria retornar 200, obteve %d: %s", w.Code, w.Body.String())
+	}
+	var result map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result["nodes"] == nil {
+		t.Error("resposta deve conter 'nodes'")
+	}
+}
+
 func TestSimulateHandlerContentTypeIsJSON(t *testing.T) {
 	payload := map[string]interface{}{
 		"nodes": []map[string]interface{}{

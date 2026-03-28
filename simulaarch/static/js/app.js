@@ -8,6 +8,7 @@ const state = {
     transform: { x: 0, y: 0, scale: 1 },
     snapToGrid: false,
     _didPan: false,
+    scenarioName: 'Meu Cenário',
 };
 
 const undoStack = [];
@@ -969,10 +970,13 @@ document.addEventListener('keyup', e => {
 // ─── Toolbar ──────────────────────────────────────────────────────────────────
 
 document.getElementById('btn-new').addEventListener('click', () => {
-    if (Object.keys(state.nodes).length === 0) return;
-    if (!confirm('Criar novo diagrama? O atual será perdido.')) return;
+    if (Object.keys(state.nodes).length > 0) {
+        if (!confirm('Criar novo diagrama? O conteúdo atual será perdido.')) return;
+    }
     Object.keys(state.nodes).forEach(k => delete state.nodes[k]);
     Object.keys(state.edges).forEach(k => delete state.edges[k]);
+    setScenarioName('Meu Cenário');
+    document.getElementById('canvas-legend')?.classList.remove('visible');
     deselectAll();
     setStatus('Novo diagrama criado.', 'success');
 });
@@ -1284,6 +1288,7 @@ document.getElementById('btn-simulate').addEventListener('click', async () => {
 
 function exportJSON() {
     const payload = {
+        name:  state.scenarioName,
         nodes: Object.values(state.nodes).map(n => ({
             id:     n.id,
             type:   n.type,
@@ -1302,14 +1307,17 @@ function exportJSON() {
         })),
     };
 
+    const safeName = state.scenarioName.replace(/[^a-zA-Z0-9_\- ]/g, '').trim() || 'simulaarch';
+    const filename = `${safeName}.json`;
+
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href     = url;
-    a.download = 'simulaarch.json';
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
-    setStatus('Diagrama exportado como simulaarch.json.', 'success');
+    setStatus(`Diagrama exportado como ${filename}.`, 'success');
 }
 
 function importJSON(file) {
@@ -1372,6 +1380,8 @@ function importJSON(file) {
             };
         });
 
+        if (data.name) setScenarioName(data.name);
+
         deselectAll();
         setStatus(`Importado: ${data.nodes.length} nó(s), ${data.edges.length} conexão(ões).`, 'success');
     };
@@ -1388,6 +1398,63 @@ document.getElementById('file-input').addEventListener('change', e => {
     importJSON(e.target.files[0]);
     e.target.value = ''; // reset para permitir reimportar o mesmo arquivo
 });
+
+// ─── Gestão de Cenário ────────────────────────────────────────────────────────
+
+function setScenarioName(name) {
+    state.scenarioName = name || 'Meu Cenário';
+    const el = document.getElementById('scenario-name');
+    if (el) el.textContent = state.scenarioName;
+    document.title = `${state.scenarioName} — SimulaArch`;
+}
+
+(function initScenarioTitle() {
+    const el = document.getElementById('scenario-name');
+    if (!el) return;
+
+    let originalText = '';
+
+    el.addEventListener('focus', () => {
+        originalText = el.textContent;
+        // Select all text on focus
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+    });
+
+    el.addEventListener('keydown', e => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            el.blur();
+        }
+        if (e.key === 'Escape') {
+            el.textContent = originalText;
+            el.blur();
+        }
+    });
+
+    el.addEventListener('blur', () => {
+        const trimmed = el.textContent.trim();
+        if (!trimmed) {
+            el.textContent = originalText || 'Meu Cenário';
+        }
+        setScenarioName(el.textContent.trim());
+        setStatus(`Cenário renomeado para "${state.scenarioName}".`, 'success');
+    });
+
+    // Prevent paste from injecting HTML
+    el.addEventListener('paste', e => {
+        e.preventDefault();
+        const text = e.clipboardData.getData('text/plain');
+        const sel = window.getSelection();
+        if (!sel.rangeCount) return;
+        sel.deleteFromDocument();
+        sel.getRangeAt(0).insertNode(document.createTextNode(text));
+        sel.collapseToEnd();
+    });
+})();
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
