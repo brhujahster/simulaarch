@@ -115,6 +115,16 @@ function renderNode(node) {
         <circle class="node-port" cx="${NODE_W}" cy="${NODE_H / 2}"
                 r="5" fill="${color}" stroke="#1e1e2e" stroke-width="1.5"
                 style="cursor:crosshair"/>
+        ${(() => {
+            if (node.type === 'service' && node.config?.clusterRef) {
+                const cl = state.nodes[node.config.clusterRef];
+                if (cl) return `<rect x="4" y="${NODE_H - 13}" width="${NODE_W - 8}" height="11" rx="3"
+                                      fill="#94e2d5" fill-opacity="0.15"/>
+                                <text x="8" y="${NODE_H - 4}" fill="#94e2d5" font-size="8"
+                                      font-family="'Segoe UI', sans-serif">⎔ ${cl.label}</text>`;
+            }
+            return '';
+        })()}
     `;
 
     // Click on port → start connecting
@@ -211,7 +221,61 @@ function renderEdges() {
     });
 }
 
+// ─── Cluster Containers ───────────────────────────────────────────────────────
+
+function renderClusterContainers() {
+    let layer = document.getElementById('clusters-layer');
+    if (!layer) {
+        layer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        layer.setAttribute('id', 'clusters-layer');
+        const svgEl = document.getElementById('canvas');
+        svgEl.insertBefore(layer, svgEl.firstChild);
+    }
+    layer.innerHTML = '';
+
+    const clusterColor = NODE_COLORS.cluster;
+    const PAD = 20;
+
+    Object.values(state.nodes)
+        .filter(n => n.type === 'cluster')
+        .forEach(cluster => {
+            const members = Object.values(state.nodes).filter(
+                n => n.type === 'service' && n.config?.clusterRef === cluster.id
+            );
+            if (members.length === 0) return;
+
+            const minX = Math.min(...members.map(n => n.x)) - PAD;
+            const minY = Math.min(...members.map(n => n.y)) - PAD - 16;
+            const maxX = Math.max(...members.map(n => n.x + NODE_W)) + PAD;
+            const maxY = Math.max(...members.map(n => n.y + NODE_H)) + PAD;
+
+            const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rect.setAttribute('x', minX);
+            rect.setAttribute('y', minY);
+            rect.setAttribute('width', maxX - minX);
+            rect.setAttribute('height', maxY - minY);
+            rect.setAttribute('rx', '12');
+            rect.setAttribute('fill', clusterColor);
+            rect.setAttribute('fill-opacity', '0.05');
+            rect.setAttribute('stroke', clusterColor);
+            rect.setAttribute('stroke-width', '1.5');
+            rect.setAttribute('stroke-dasharray', '6,3');
+            layer.appendChild(rect);
+
+            const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+            label.setAttribute('x', minX + 10);
+            label.setAttribute('y', minY + 13);
+            label.setAttribute('fill', clusterColor);
+            label.setAttribute('font-size', '10');
+            label.setAttribute('font-family', "'Segoe UI', sans-serif");
+            label.setAttribute('font-weight', '600');
+            label.textContent = `⎔ ${cluster.label}`;
+            layer.appendChild(label);
+        });
+}
+
 function renderAll() {
+    renderClusterContainers();
     Object.values(state.nodes).forEach(renderNode);
     renderEdges();
 }
@@ -355,14 +419,25 @@ function configFieldsHTML(node) {
                 ${fieldHTML('cfg-ratelimit',  'Rate Limit RPS',      c.rateLimitRPS     ?? 500)}
                 ${fieldHTML('cfg-latency-oh', 'Latency Overhead (ms)', c.latencyOverheadMs ?? 5)}
             `;
-        case 'service':
+        case 'service': {
+            const clusters = Object.values(state.nodes).filter(n => n.type === 'cluster');
+            const clusterOptions = clusters.map(cl =>
+                `<option value="${cl.id}" ${c.clusterRef === cl.id ? 'selected' : ''}>${cl.label}</option>`
+            ).join('');
             return `
                 <p class="prop-section-title" style="margin-top:12px">Configuração</p>
                 ${fieldHTML('cfg-cpu',         'CPU Cores',            c.cpuCores      ?? 2)}
                 ${fieldHTML('cfg-ram',         'RAM (GB)',              c.ramGB         ?? 2)}
                 ${fieldHTML('cfg-processtime', 'Process Time (ms)',     c.processTimeMs ?? 50)}
                 <p class="prop-hint">MaxRPS teórico: <strong id="derived-maxrps">—</strong></p>
+                <p class="prop-section-title" style="margin-top:12px">Cluster K8s</p>
+                <label class="prop-label">Associar ao Cluster</label>
+                <select id="cfg-cluster-ref" class="prop-input">
+                    <option value="">— Nenhum —</option>
+                    ${clusterOptions}
+                </select>
             `;
+        }
         case 'queue':
             return `
                 <p class="prop-section-title" style="margin-top:12px">Configuração</p>
@@ -409,6 +484,10 @@ function bindConfigFields(node) {
             const initMax   = initPt > 0 ? ((1000 * initCores) / initPt).toFixed(1) : '—';
             const maxEl = document.getElementById('derived-maxrps');
             if (maxEl) maxEl.textContent = initMax + ' RPS';
+            document.getElementById('cfg-cluster-ref')?.addEventListener('change', e => {
+                node.config.clusterRef = e.target.value || null;
+                renderAll();
+            });
             break;
         case 'queue':
             bindConfig('cfg-throughput',    node, 'throughputMaxMsgsPerSec');
@@ -513,6 +592,11 @@ function deleteSelected() {
 
     if (state.selectedType === 'node') {
         const id = state.selectedId;
+        if (state.nodes[id]?.type === 'cluster') {
+            Object.values(state.nodes).forEach(n => {
+                if (n.config?.clusterRef === id) delete n.config.clusterRef;
+            });
+        }
         delete state.nodes[id];
         Object.keys(state.edges).forEach(eid => {
             if (state.edges[eid].from === id || state.edges[eid].to === id)

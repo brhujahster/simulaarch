@@ -314,3 +314,154 @@ func TestEdgeLatencyAccumulation(t *testing.T) {
 		t.Errorf("edge latencyMs esperado 20, obteve %.1f", e1.LatencyMs)
 	}
 }
+
+// ─── Testes específicos de K8s Cluster (task 3.2) ─────────────────────────────
+
+func TestClusterNodeAloneIsAccepted(t *testing.T) {
+	// Cluster isolado no canvas não deve causar erro
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("k1", "cluster", map[string]interface{}{
+				"MinReplicas":   1.0,
+				"MaxReplicas":   5.0,
+				"HPA_Threshold": 0.7,
+			}),
+		},
+		Edges: []models.Edge{},
+	}
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("cluster isolado não deveria retornar erro: %v", err)
+	}
+	k, ok := findNode(res, "k1")
+	if !ok {
+		t.Fatal("k1 não encontrado no resultado")
+	}
+	if k.Status != models.StatusOK {
+		t.Errorf("cluster sem carga deveria ser OK, obteve %s", k.Status)
+	}
+}
+
+func TestClusterWithAssociatedServiceInPayload(t *testing.T) {
+	// Service com clusterRef no config não deve quebrar o motor
+	// (associação é frontend-only por enquanto; o motor ignora clusterRef)
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 80.0}),
+			node("k1", "cluster", map[string]interface{}{
+				"MinReplicas":   2.0,
+				"MaxReplicas":   10.0,
+				"HPA_Threshold": 0.7,
+			}),
+			{
+				ID:    "s1",
+				Type:  "service",
+				Label: "s1",
+				Config: map[string]interface{}{
+					"CPU_Cores":     2.0,
+					"ProcessTimeMs": 25.0,
+					"clusterRef":    "k1",
+				},
+			},
+		},
+		Edges: []models.Edge{
+			edge("e1", "c1", "s1", 1.0),
+		},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("service com clusterRef não deveria causar erro: %v", err)
+	}
+
+	s1, _ := findNode(res, "s1")
+	// MaxRPS = (1000*2)/25 = 80 → util = 1.0 → CRITICAL
+	if s1.Status != models.StatusCritical {
+		t.Errorf("esperava CRITICAL (util=1.0), obteve %s", s1.Status)
+	}
+	if s1.EffectiveRPS != 80 {
+		t.Errorf("effectiveRPS esperado 80, obteve %.1f", s1.EffectiveRPS)
+	}
+}
+
+func TestClusterGatewayServiceChain(t *testing.T) {
+	// Client → Gateway → Service (no cluster) → resultado correto
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 150.0}),
+			node("gw", "apigateway", map[string]interface{}{"RateLimitRPS": 100.0, "LatencyOverheadMs": 3.0}),
+			node("k1", "cluster", map[string]interface{}{"MinReplicas": 2.0, "MaxReplicas": 8.0, "HPA_Threshold": 0.6}),
+			{
+				ID:    "s1",
+				Type:  "service",
+				Label: "s1",
+				Config: map[string]interface{}{
+					"CPU_Cores":     4.0,
+					"ProcessTimeMs": 20.0,
+					"clusterRef":    "k1",
+				},
+			},
+		},
+		Edges: []models.Edge{
+			edge("e1", "c1", "gw", 1.0),
+			edge("e2", "gw", "s1", 1.0),
+		},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	gw, _ := findNode(res, "gw")
+	if gw.EffectiveRPS != 100 {
+		t.Errorf("gateway deve limitar a 100 RPS, obteve %.1f", gw.EffectiveRPS)
+	}
+
+	s1, _ := findNode(res, "s1")
+	// MaxRPS = (1000*4)/20 = 200 → util = 100/200 = 0.5 → OK
+	if s1.Status != models.StatusOK {
+		t.Errorf("service esperado OK (util=0.5), obteve %s", s1.Status)
+	}
+	// latência: gateway(3ms) + service(20ms) = 23ms
+	if s1.LatencyMs != 23 {
+		t.Errorf("latencyMs esperado 23, obteve %.1f", s1.LatencyMs)
+	}
+}
+
+func TestMultipleClustersIndependent(t *testing.T) {
+	// Dois clusters independentes não interferem entre si
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 50.0}),
+			node("c2", "client", map[string]interface{}{"RPS": 200.0}),
+			node("k1", "cluster", map[string]interface{}{"MinReplicas": 1.0, "MaxReplicas": 4.0, "HPA_Threshold": 0.7}),
+			node("k2", "cluster", map[string]interface{}{"MinReplicas": 2.0, "MaxReplicas": 10.0, "HPA_Threshold": 0.6}),
+			{ID: "sa", Type: "service", Label: "sa",
+				Config: map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 50.0, "clusterRef": "k1"}},
+			{ID: "sb", Type: "service", Label: "sb",
+				Config: map[string]interface{}{"CPU_Cores": 1.0, "ProcessTimeMs": 10.0, "clusterRef": "k2"}},
+		},
+		Edges: []models.Edge{
+			edge("e1", "c1", "sa", 1.0),
+			edge("e2", "c2", "sb", 1.0),
+		},
+	}
+
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+
+	sa, _ := findNode(res, "sa")
+	sb, _ := findNode(res, "sb")
+
+	// sa: MaxRPS=(1000*2)/50=40, util=50/40=1.25 → CRITICAL
+	if sa.Status != models.StatusCritical {
+		t.Errorf("sa esperado CRITICAL, obteve %s", sa.Status)
+	}
+	// sb: MaxRPS=(1000*1)/10=100, util=200/100=2.0 → CRITICAL
+	if sb.Status != models.StatusCritical {
+		t.Errorf("sb esperado CRITICAL, obteve %s", sb.Status)
+	}
+}
