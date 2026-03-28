@@ -7,10 +7,9 @@ import (
 	"simulaarch/models"
 )
 
-// nodeMap e edgeMap para acesso rápido por ID
 type graph struct {
 	nodes    map[string]models.Node
-	outEdges map[string][]models.Edge // nodeID -> arestas de saída
+	outEdges map[string][]models.Edge
 }
 
 func buildGraph(arch models.Architecture) graph {
@@ -27,7 +26,7 @@ func buildGraph(arch models.Architecture) graph {
 	return g
 }
 
-// detectCycles usa DFS com coloração (white=0, gray=1, black=2)
+// detectCycles usa DFS com coloração (white=0, gray=1, black=2).
 func detectCycles(g graph) error {
 	color := make(map[string]int)
 	var dfs func(id string) bool
@@ -68,7 +67,18 @@ func getFloat(config map[string]interface{}, key string, defaultVal float64) flo
 	return defaultVal
 }
 
-// Simulate executa a simulação de carga síncrona sobre a arquitetura fornecida.
+func statusFor(utilization float64) string {
+	if utilization >= 1.0 {
+		return models.StatusCritical
+	}
+	if utilization >= 0.8 {
+		return models.StatusAlert
+	}
+	return models.StatusOK
+}
+
+// Simulate executa a simulação de carga sobre a arquitetura fornecida,
+// suportando caminhos síncronos e assíncronos (Queue como barreira de fluxo).
 func Simulate(arch models.Architecture) (models.SimulationResult, error) {
 	result := models.SimulationResult{
 		Nodes: []models.NodeResult{},
@@ -85,24 +95,20 @@ func Simulate(arch models.Architecture) (models.SimulationResult, error) {
 		return result, err
 	}
 
-	// rpsAt[nodeID] = RPS acumulado recebido pelo nó
+	// rpsAt[nodeID]     = RPS acumulado recebido pelo nó
+	// latencyAt[nodeID] = latência acumulada até esse nó (caminho mais longo)
 	rpsAt := make(map[string]float64)
-	// latencyAt[nodeID] = latência acumulada até esse nó (caminho mais longo até ele)
 	latencyAt := make(map[string]float64)
-	// edgeRPS[edgeID] = RPS efetivo fluindo na aresta
 	edgeRPS := make(map[string]float64)
-	// edgeLatency[edgeID] = latência da aresta
 	edgeLatency := make(map[string]float64)
 
-	// Inicializa nós client com seus RPS configurados
 	for _, n := range arch.Nodes {
 		if n.Type == "client" {
-			rps := getFloat(n.Config, "RPS", 0)
-			rpsAt[n.ID] = rps
+			rpsAt[n.ID] = getFloat(n.Config, "RPS", 0)
 		}
 	}
 
-	// Ordenação topológica (Kahn's algorithm) para processar nós em ordem
+	// Ordenação topológica (Kahn)
 	inDegree := make(map[string]int)
 	for id := range g.nodes {
 		inDegree[id] = 0
@@ -112,39 +118,35 @@ func Simulate(arch models.Architecture) (models.SimulationResult, error) {
 			inDegree[e.To]++
 		}
 	}
-
-	queue := []string{}
+	topoQueue := []string{}
 	for id, deg := range inDegree {
 		if deg == 0 {
-			queue = append(queue, id)
+			topoQueue = append(topoQueue, id)
 		}
 	}
-
 	processed := []string{}
-	for len(queue) > 0 {
-		cur := queue[0]
-		queue = queue[1:]
+	for len(topoQueue) > 0 {
+		cur := topoQueue[0]
+		topoQueue = topoQueue[1:]
 		processed = append(processed, cur)
 		for _, e := range g.outEdges[cur] {
 			inDegree[e.To]--
 			if inDegree[e.To] == 0 {
-				queue = append(queue, e.To)
+				topoQueue = append(topoQueue, e.To)
 			}
 		}
 	}
 
-	// Processa cada nó em ordem topológica
 	for _, id := range processed {
 		n := g.nodes[id]
 		inRPS := rpsAt[id]
 		inLatency := latencyAt[id]
 
-		var effectiveRPS float64
-		var nodeLatency float64
-		var utilization float64
-		status := models.StatusOK
+		var effectiveRPS, nodeLatency, utilization float64
+		var nodeMetrics map[string]interface{}
 
 		switch n.Type {
+
 		case "client":
 			effectiveRPS = getFloat(n.Config, "RPS", 0)
 			nodeLatency = 0
@@ -153,47 +155,92 @@ func Simulate(arch models.Architecture) (models.SimulationResult, error) {
 		case "apigateway":
 			rateLimitRPS := getFloat(n.Config, "RateLimitRPS", math.MaxFloat64)
 			latencyOverhead := getFloat(n.Config, "LatencyOverheadMs", 0)
-
 			effectiveRPS = math.Min(inRPS, rateLimitRPS)
 			nodeLatency = inLatency + latencyOverhead
 			if rateLimitRPS > 0 {
 				utilization = inRPS / rateLimitRPS
 			}
 
+		case "queue":
+			throughputMax := getFloat(n.Config, "ThroughputMaxMsgsPerSec", math.MaxFloat64)
+			writeLatencyMs := getFloat(n.Config, "WriteLatencyMs", 0)
+
+			egressRPS := math.Min(inRPS, throughputMax)
+			lagEst := math.Max(0, inRPS-throughputMax)
+
+			if throughputMax > 0 {
+				utilization = inRPS / throughputMax
+			}
+			effectiveRPS = egressRPS
+			// Barreira assíncrona: a latência do caminho downstream começa
+			// a partir do tempo de escrita na fila, independente do upstream.
+			nodeLatency = writeLatencyMs
+
+			nodeMetrics = map[string]interface{}{
+				"ingressRPS": inRPS,
+				"egressRPS":  egressRPS,
+				"lagEst":     lagEst,
+			}
+
 		case "service":
 			cpuCores := getFloat(n.Config, "CPU_Cores", 1)
 			processTimeMs := getFloat(n.Config, "ProcessTimeMs", 0)
 
-			maxRPS := 0.0
+			maxRPSPerReplica := 0.0
 			if processTimeMs > 0 {
-				maxRPS = (1000 * cpuCores) / processTimeMs
+				maxRPSPerReplica = (1000 * cpuCores) / processTimeMs
 			}
+
+			actualReplicas := 1.0
+			if clusterID, ok := n.Config["clusterRef"].(string); ok && clusterID != "" {
+				if cl, exists := g.nodes[clusterID]; exists && cl.Type == "cluster" {
+					minR := getFloat(cl.Config, "MinReplicas", 1)
+					maxR := getFloat(cl.Config, "MaxReplicas", 1)
+					hpa := getFloat(cl.Config, "HPA_Threshold", 0.7)
+
+					if hpa > 0 && maxRPSPerReplica > 0 {
+						singleUtil := inRPS / maxRPSPerReplica
+						needed := math.Ceil(singleUtil / hpa)
+						actualReplicas = math.Max(minR, math.Min(maxR, needed))
+					} else {
+						actualReplicas = minR
+					}
+
+					isSaturated := inRPS > maxRPSPerReplica*maxR
+					nodeMetrics = map[string]interface{}{
+						"replicas":    actualReplicas,
+						"isSaturated": isSaturated,
+					}
+				}
+			}
+
+			effectiveMaxRPS := maxRPSPerReplica * actualReplicas
 			effectiveRPS = inRPS
-			if maxRPS > 0 {
-				utilization = inRPS / maxRPS
+			if effectiveMaxRPS > 0 {
+				utilization = inRPS / effectiveMaxRPS
 			}
 			nodeLatency = inLatency + processTimeMs
+
+		case "cluster":
+			// Cluster é metadata para serviços associados; não transporta tráfego.
+			effectiveRPS = 0
+			nodeLatency = 0
+			utilization = 0
 
 		default:
 			effectiveRPS = inRPS
 			nodeLatency = inLatency
 		}
 
-		if utilization >= 1.0 {
-			status = models.StatusCritical
-		} else if utilization >= 0.8 {
-			status = models.StatusAlert
-		}
-
 		result.Nodes = append(result.Nodes, models.NodeResult{
 			ID:           id,
-			Status:       status,
+			Status:       statusFor(utilization),
 			Utilization:  utilization,
 			EffectiveRPS: effectiveRPS,
 			LatencyMs:    nodeLatency,
+			Metrics:      nodeMetrics,
 		})
 
-		// Propaga RPS para arestas de saída respeitando TrafficShare
 		for _, e := range g.outEdges[id] {
 			share := e.TrafficShare
 			if share <= 0 {
@@ -205,9 +252,7 @@ func Simulate(arch models.Architecture) (models.SimulationResult, error) {
 			edgeRPS[e.ID] += flowRPS
 			edgeLatency[e.ID] = edgeLatMs
 
-			// Acumula RPS e latência no nó destino
 			rpsAt[e.To] += flowRPS
-			// Latência do destino = máximo dos caminhos chegando até ele
 			candidate := nodeLatency + edgeLatMs
 			if candidate > latencyAt[e.To] {
 				latencyAt[e.To] = candidate
