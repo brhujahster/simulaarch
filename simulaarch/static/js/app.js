@@ -3,8 +3,14 @@ const state = {
     edges: {},
     selectedId: null,
     selectedType: null,
+    selectedIds: new Set(),
     connecting: null,
+    transform: { x: 0, y: 0, scale: 1 },
+    snapToGrid: false,
+    _didPan: false,
 };
+
+const undoStack = [];
 
 const NODE_COLORS = {
     client:  '#89b4fa',
@@ -93,8 +99,10 @@ function renderNode(node) {
     const isSelected = state.selectedId === node.id;
     const sim = node._simResult;
 
-    // Stroke color: selected > sim status > node default
+    // Stroke color: selected > multi-selected > sim status > node default
+    const isMultiSelected = state.selectedIds.has(node.id);
     const strokeColor = isSelected ? '#f9e2af'
+        : isMultiSelected ? '#89b4fa'
         : sim ? (sim.status === 'CRITICAL' ? '#f38ba8'
                : sim.status === 'ALERT'    ? '#f9e2af'
                : '#a6e3a1')
@@ -161,8 +169,9 @@ function renderNode(node) {
         startConnecting(node.id);
     });
 
-    // Click on node body → finish connecting OR select
+    // Click on node body → finish connecting OR select/drag
     g.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
         if (e.target.classList.contains('node-port')) return;
         e.stopPropagation();
 
@@ -171,19 +180,38 @@ function renderNode(node) {
             return;
         }
 
+        // Shift+click: toggle multi-select
+        if (e.shiftKey) {
+            if (state.selectedIds.has(node.id)) state.selectedIds.delete(node.id);
+            else state.selectedIds.add(node.id);
+            renderAll();
+            return;
+        }
+
+        state.selectedIds.clear();
         selectNode(node.id);
 
-        const svg = document.getElementById('canvas');
-        const rect = svg.getBoundingClientRect();
-        let dragOffX = e.clientX - rect.left - node.x;
-        let dragOffY = e.clientY - rect.top - node.y;
+        const svgEl = document.getElementById('canvas');
+        const svgRect = svgEl.getBoundingClientRect();
+        const { x: tx, y: ty, scale } = state.transform;
+        const startW = { x: (e.clientX - svgRect.left - tx) / scale, y: (e.clientY - svgRect.top - ty) / scale };
+        const dragOffX = startW.x - node.x;
+        const dragOffY = startW.y - node.y;
         let dragging = true;
 
         const onMove = ev => {
             if (!dragging) return;
             hideTooltip();
-            node.x = ev.clientX - rect.left - dragOffX;
-            node.y = ev.clientY - rect.top - dragOffY;
+            const { x: tx2, y: ty2, scale: sc2 } = state.transform;
+            let wx = (ev.clientX - svgRect.left - tx2) / sc2 - dragOffX;
+            let wy = (ev.clientY - svgRect.top  - ty2) / sc2 - dragOffY;
+            if (state.snapToGrid) {
+                const G = 24;
+                wx = Math.round(wx / G) * G;
+                wy = Math.round(wy / G) * G;
+            }
+            node.x = wx;
+            node.y = wy;
             g.setAttribute('transform', `translate(${node.x}, ${node.y})`);
             renderEdges();
         };
@@ -322,8 +350,8 @@ function renderClusterContainers() {
     if (!layer) {
         layer = document.createElementNS('http://www.w3.org/2000/svg', 'g');
         layer.setAttribute('id', 'clusters-layer');
-        const svgEl = document.getElementById('canvas');
-        svgEl.insertBefore(layer, svgEl.firstChild);
+        const viewport = document.getElementById('viewport');
+        viewport.insertBefore(layer, viewport.firstChild);
     }
     layer.innerHTML = '';
 
@@ -392,13 +420,11 @@ function startConnecting(fromId) {
 
     const onMouseMove = e => {
         if (!state.connecting) return;
-        const rect = svgCanvas.getBoundingClientRect();
-        const mx = e.clientX - rect.left;
-        const my = e.clientY - rect.top;
+        const wp = screenToWorld(e.clientX, e.clientY);
         pendingLine.setAttribute('x1', from.x + NODE_W);
         pendingLine.setAttribute('y1', from.y + NODE_H / 2);
-        pendingLine.setAttribute('x2', mx);
-        pendingLine.setAttribute('y2', my);
+        pendingLine.setAttribute('x2', wp.x);
+        pendingLine.setAttribute('y2', wp.y);
     };
 
     state.connecting._onMouseMove = onMouseMove;
@@ -468,6 +494,7 @@ function selectNode(id, type = 'node') {
 function deselectAll() {
     state.selectedId = null;
     state.selectedType = null;
+    state.selectedIds.clear();
     renderAll();
     document.getElementById('properties-panel').innerHTML =
         '<p id="properties-placeholder">Selecione um componente</p>';
@@ -735,20 +762,30 @@ function deleteSelected() {
 
     if (state.selectedType === 'node') {
         const id = state.selectedId;
+        const deletedEdges = Object.values(state.edges)
+            .filter(e => e.from === id || e.to === id)
+            .map(e => ({ ...e, config: { ...e.config } }));
+        undoStack.push({
+            type: 'deleteNode',
+            node: { ...state.nodes[id], config: { ...state.nodes[id].config } },
+            edges: deletedEdges,
+        });
+        if (undoStack.length > 50) undoStack.shift();
+
         if (state.nodes[id]?.type === 'cluster') {
             Object.values(state.nodes).forEach(n => {
                 if (n.config?.clusterRef === id) delete n.config.clusterRef;
             });
         }
         delete state.nodes[id];
-        Object.keys(state.edges).forEach(eid => {
-            if (state.edges[eid].from === id || state.edges[eid].to === id)
-                delete state.edges[eid];
-        });
-        setStatus('Nó removido.', 'warn');
+        deletedEdges.forEach(e => delete state.edges[e.id]);
+        setStatus('Nó removido. Ctrl+Z para desfazer.', 'warn');
     } else if (state.selectedType === 'edge') {
+        const e = state.edges[state.selectedId];
+        undoStack.push({ type: 'deleteEdge', edge: { ...e, config: { ...e.config } } });
+        if (undoStack.length > 50) undoStack.shift();
         delete state.edges[state.selectedId];
-        setStatus('Conexão removida.', 'warn');
+        setStatus('Conexão removida. Ctrl+Z para desfazer.', 'warn');
     }
 
     deselectAll();
@@ -784,9 +821,14 @@ const svgCanvas = document.getElementById('canvas');
         const type = e.dataTransfer.getData('node-type') || e.dataTransfer.getData('text/plain');
         if (!type || !NODE_LABELS[type]) return;
 
-        const rect = svgCanvas.getBoundingClientRect();
-        const x = e.clientX - rect.left - NODE_W / 2;
-        const y = e.clientY - rect.top  - NODE_H / 2;
+        const wp = screenToWorld(e.clientX, e.clientY);
+        const G = 24;
+        let x = wp.x - NODE_W / 2;
+        let y = wp.y - NODE_H / 2;
+        if (state.snapToGrid) {
+            x = Math.round(x / G) * G;
+            y = Math.round(y / G) * G;
+        }
         const id = generateId('node');
 
         const existingCount = Object.values(state.nodes).filter(n => n.type === type).length;
@@ -806,10 +848,70 @@ const svgCanvas = document.getElementById('canvas');
     });
 });
 
+// ─── Viewport transform helpers ───────────────────────────────────────────────
+
+function applyTransform() {
+    const { x, y, scale } = state.transform;
+    document.getElementById('viewport').setAttribute('transform', `translate(${x}, ${y}) scale(${scale})`);
+}
+
+function screenToWorld(clientX, clientY) {
+    const rect = document.getElementById('canvas').getBoundingClientRect();
+    const { x, y, scale } = state.transform;
+    return { x: (clientX - rect.left - x) / scale, y: (clientY - rect.top - y) / scale };
+}
+
+// ─── Zoom (mouse wheel) ───────────────────────────────────────────────────────
+
+svgCanvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const delta = e.deltaY < 0 ? 1.1 : 0.9;
+    const { x, y, scale } = state.transform;
+    const rect = svgCanvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const newScale = Math.min(3, Math.max(0.15, scale * delta));
+    state.transform = {
+        x: mx - (mx - x) * (newScale / scale),
+        y: my - (my - y) * (newScale / scale),
+        scale: newScale,
+    };
+    applyTransform();
+}, { passive: false });
+
+// ─── Pan (right-click drag or Space + left drag) ───────────────────────────────
+
+svgCanvas.addEventListener('mousedown', e => {
+    if (e.button !== 2 && !state._spaceDown) return;
+    e.preventDefault();
+    state._panning = false;
+    const startX = e.clientX, startY = e.clientY;
+    const startTx = state.transform.x, startTy = state.transform.y;
+
+    const onMove = ev => {
+        state._panning = true;
+        state.transform.x = startTx + (ev.clientX - startX);
+        state.transform.y = startTy + (ev.clientY - startY);
+        applyTransform();
+    };
+    const onUp = () => {
+        svgCanvas.style.cursor = state._spaceDown ? 'grab' : '';
+        setTimeout(() => { state._panning = false; }, 0);
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+    };
+    svgCanvas.style.cursor = 'grabbing';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+});
+
+svgCanvas.addEventListener('contextmenu', e => e.preventDefault());
+
 // ─── Canvas click = deselect / cancel connecting ──────────────────────────────
 
 svgCanvas.addEventListener('click', e => {
-    if (e.target === svgCanvas) {
+    if (state._panning) return;
+    if (e.target === svgCanvas || e.target.id === 'viewport') {
         if (state.connecting) cancelConnecting();
         else deselectAll();
     }
@@ -818,14 +920,49 @@ svgCanvas.addEventListener('click', e => {
 // ─── Keyboard ─────────────────────────────────────────────────────────────────
 
 document.addEventListener('keydown', e => {
+    // Ctrl+Z: undo
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+        e.preventDefault();
+        if (undoStack.length === 0) { setStatus('Nada para desfazer.', 'warn'); return; }
+        const action = undoStack.pop();
+        if (action.type === 'deleteNode') {
+            state.nodes[action.node.id] = action.node;
+            action.edges.forEach(ed => { state.edges[ed.id] = ed; });
+        } else if (action.type === 'deleteEdge') {
+            state.edges[action.edge.id] = action.edge;
+        }
+        renderAll();
+        setStatus('Ação desfeita.', 'success');
+        return;
+    }
+    // Ctrl+S: export
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        exportJSON();
+        return;
+    }
     if (e.key === 'Escape') {
         cancelConnecting();
+        return;
+    }
+    // Space: enable pan cursor
+    if (e.code === 'Space' && !e.repeat && document.activeElement.tagName !== 'INPUT') {
+        state._spaceDown = true;
+        svgCanvas.style.cursor = 'grab';
+        e.preventDefault();
         return;
     }
     if ((e.key === 'Delete' || e.key === 'Backspace') &&
         document.activeElement.tagName !== 'INPUT' &&
         document.activeElement.tagName !== 'SELECT') {
         deleteSelected();
+    }
+});
+
+document.addEventListener('keyup', e => {
+    if (e.code === 'Space') {
+        state._spaceDown = false;
+        if (!state._panning) svgCanvas.style.cursor = '';
     }
 });
 
@@ -846,6 +983,36 @@ document.getElementById('btn-clear').addEventListener('click', () => {
     Object.keys(state.edges).forEach(k => delete state.edges[k]);
     deselectAll();
     setStatus('Canvas limpo.', 'warn');
+});
+
+document.getElementById('btn-fit').addEventListener('click', () => {
+    const nodes = Object.values(state.nodes);
+    if (nodes.length === 0) { setStatus('Canvas vazio — sem conteúdo para centralizar.', 'warn'); return; }
+    const minX = Math.min(...nodes.map(n => n.x));
+    const minY = Math.min(...nodes.map(n => n.y));
+    const maxX = Math.max(...nodes.map(n => n.x + NODE_W));
+    const maxY = Math.max(...nodes.map(n => n.y + NODE_H));
+    const PADDING = 60;
+    const svgRect = svgCanvas.getBoundingClientRect();
+    const scale = Math.min(
+        (svgRect.width  - PADDING * 2) / Math.max(maxX - minX, 1),
+        (svgRect.height - PADDING * 2) / Math.max(maxY - minY, 1),
+        1.5
+    );
+    state.transform = {
+        x: (svgRect.width  - (maxX - minX) * scale) / 2 - minX * scale,
+        y: (svgRect.height - (maxY - minY) * scale) / 2 - minY * scale,
+        scale,
+    };
+    applyTransform();
+    setStatus('Canvas centralizado.', 'success');
+});
+
+document.getElementById('btn-snap').addEventListener('click', function () {
+    state.snapToGrid = !state.snapToGrid;
+    this.textContent = `Snap: ${state.snapToGrid ? 'ON' : 'OFF'}`;
+    this.style.color = state.snapToGrid ? '#a6e3a1' : '';
+    setStatus(`Snap to grid ${state.snapToGrid ? 'ativado' : 'desativado'}.`, state.snapToGrid ? 'success' : 'warn');
 });
 
 // ─── Simulação ────────────────────────────────────────────────────────────────
