@@ -815,8 +815,129 @@ function applySimulationResult(result) {
     // Atualiza painel se houver nó selecionado
     if (state.selectedId && state.selectedType === 'node') showProperties(state.selectedId, 'node');
 
-    // Exibe modal de rotas
-    if (result.routes?.length) showRoutesModal(result.routes);
+    // Exibe painel de gargalos (e oferece acesso às rotas)
+    showBottleneckDashboard(result);
+}
+
+function showBottleneckDashboard(result) {
+    document.getElementById('bottleneck-modal')?.remove();
+
+    const TOP_N = 5;
+
+    // Exclui client e cluster (não têm utilização significativa)
+    const rankable = result.nodes.filter(nr => {
+        const type = state.nodes[nr.id]?.type;
+        return type && type !== 'client' && type !== 'cluster';
+    });
+
+    const topNodes = [...rankable]
+        .sort((a, b) => b.utilization - a.utilization)
+        .slice(0, TOP_N);
+
+    // Tráfego descartado: gateway drops + queue lag
+    const dropDetails = [];
+    let totalGatewayDrops = 0;
+    let totalQueueLag    = 0;
+
+    result.nodes.forEach(nr => {
+        const type  = state.nodes[nr.id]?.type;
+        const label = state.nodes[nr.id]?.label || nr.id;
+        if (type === 'gateway' && nr.utilization > 1) {
+            // effectiveRPS = rateLimitRPS quando capped; drops = (util-1) * effectiveRPS
+            const drops = (nr.utilization - 1) * nr.effectiveRPS;
+            totalGatewayDrops += drops;
+            dropDetails.push({ label, kind: 'Gateway', value: drops, unit: 'RPS descartados' });
+        }
+        if (type === 'queue' && nr.metrics?.lagEst > 0) {
+            totalQueueLag += nr.metrics.lagEst;
+            dropDetails.push({ label, kind: 'Queue', value: nr.metrics.lagEst, unit: 'msg/s de lag' });
+        }
+    });
+
+    // ─── Linhas da tabela de gargalos ─────────────────────────────────────────
+    const bottleneckRows = topNodes.length === 0
+        ? `<tr><td colspan="5" class="bn-empty">Nenhum componente analisável detectado.</td></tr>`
+        : topNodes.map(nr => {
+            const label      = state.nodes[nr.id]?.label || nr.id;
+            const typeStr    = NODE_LABELS[state.nodes[nr.id]?.type] || (state.nodes[nr.id]?.type || '?');
+            const icon       = nr.status === 'CRITICAL' ? '🔴' : nr.status === 'ALERT' ? '⚠️' : '🟢';
+            const pct        = (nr.utilization * 100).toFixed(1);
+            const statColor  = nr.status === 'CRITICAL' ? '#f38ba8'
+                             : nr.status === 'ALERT'    ? '#f9e2af'
+                             : '#a6e3a1';
+            return `<tr>
+                <td class="bn-icon">${icon}</td>
+                <td class="bn-label">${label}</td>
+                <td class="bn-type">${typeStr}</td>
+                <td class="bn-util" style="color:${statColor};font-weight:700">${pct}%</td>
+                <td class="bn-rps">${nr.effectiveRPS.toFixed(1)}</td>
+            </tr>`;
+        }).join('');
+
+    // ─── Seção de tráfego descartado ──────────────────────────────────────────
+    let dropHTML = '';
+    if (dropDetails.length === 0) {
+        dropHTML = `<p class="bn-no-drops">Nenhum tráfego descartado detectado.</p>`;
+    } else {
+        dropHTML = dropDetails.map(d => `
+            <div class="bn-drop-entry">
+                <span class="bn-drop-label">⚠️ ${d.label} <em>(${d.kind})</em></span>
+                <span class="bn-drop-value">${d.value.toFixed(1)} ${d.unit}</span>
+            </div>`).join('');
+        if (totalGatewayDrops > 0)
+            dropHTML += `<div class="bn-drop-total">Total descartado (Gateways): ${totalGatewayDrops.toFixed(1)} RPS</div>`;
+        if (totalQueueLag > 0)
+            dropHTML += `<div class="bn-drop-total">Total de lag (Queues): ${totalQueueLag.toFixed(1)} msg/s</div>`;
+    }
+
+    const hasRoutes = (result.routes?.length ?? 0) > 0;
+
+    const modal = document.createElement('div');
+    modal.id = 'bottleneck-modal';
+    modal.className = 'bottleneck-modal';
+    modal.innerHTML = `
+        <div class="bottleneck-modal-content">
+            <div class="bottleneck-modal-header">
+                <span>Resumo da Simulação</span>
+                <button class="bn-close-x">✕</button>
+            </div>
+            <div class="bottleneck-modal-body">
+                <p class="bn-section-title">Top Gargalos (por utilização)</p>
+                <table class="bn-table">
+                    <thead>
+                        <tr>
+                            <th></th>
+                            <th>Nó</th>
+                            <th>Tipo</th>
+                            <th>Utilização</th>
+                            <th>RPS Efetivo</th>
+                        </tr>
+                    </thead>
+                    <tbody>${bottleneckRows}</tbody>
+                </table>
+                <p class="bn-section-title" style="margin-top:16px">Tráfego Descartado / Lag</p>
+                <div class="bn-drops">${dropHTML}</div>
+            </div>
+            <div class="bottleneck-modal-footer">
+                ${hasRoutes ? `<button class="bn-btn-routes btn-secondary">Ver Métricas de Rotas</button>` : ''}
+                <button class="bn-btn-close btn-primary">Fechar</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    const close = () => modal.remove();
+    modal.querySelector('.bn-close-x').addEventListener('click', close);
+    modal.querySelector('.bn-btn-close').addEventListener('click', close);
+    modal.addEventListener('click', e => { if (e.target === modal) close(); });
+
+    if (hasRoutes) {
+        modal.querySelector('.bn-btn-routes').addEventListener('click', () => {
+            close();
+            showRoutesModal(result.routes);
+        });
+    }
 }
 
 function showRoutesModal(routes) {
