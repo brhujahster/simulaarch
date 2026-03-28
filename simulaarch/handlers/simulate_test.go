@@ -202,6 +202,96 @@ func TestSimulateHandlerQueueImported(t *testing.T) {
 	}
 }
 
+func TestSimulateHandlerGatewayDropsInResult(t *testing.T) {
+	// Gateway com RateLimitRPS=50 recebendo 200 RPS → utilização=4 (CRITICAL)
+	// A resposta deve conter o nó gateway com utilization > 1 para o dashboard calcular drops
+	payload := map[string]interface{}{
+		"nodes": []map[string]interface{}{
+			{"id": "c1", "type": "client", "label": "Client", "x": 50.0, "y": 100.0,
+				"config": map[string]interface{}{"RPS": 200.0}},
+			{"id": "gw", "type": "apigateway", "label": "Gateway", "x": 250.0, "y": 100.0,
+				"config": map[string]interface{}{"RateLimitRPS": 50.0, "LatencyOverheadMs": 2.0}},
+			{"id": "s1", "type": "service", "label": "Service", "x": 450.0, "y": 100.0,
+				"config": map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 20.0}},
+		},
+		"edges": []map[string]interface{}{
+			{"id": "e1", "from": "c1", "to": "gw", "trafficShare": 1.0, "config": map[string]interface{}{}},
+			{"id": "e2", "from": "gw", "to": "s1", "trafficShare": 1.0, "config": map[string]interface{}{}},
+		},
+	}
+	w := post(t, payload)
+	if w.Code != http.StatusOK {
+		t.Fatalf("esperava 200, obteve %d: %s", w.Code, w.Body.String())
+	}
+	var result map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &result)
+
+	nodes := result["nodes"].([]interface{})
+	var gwNode map[string]interface{}
+	for _, n := range nodes {
+		nm := n.(map[string]interface{})
+		if nm["id"] == "gw" {
+			gwNode = nm
+		}
+	}
+	if gwNode == nil {
+		t.Fatal("nó gateway não encontrado no resultado")
+	}
+	util := gwNode["utilization"].(float64)
+	if util <= 1.0 {
+		t.Errorf("gateway deveria ter utilization > 1 (saturado), obteve %.2f", util)
+	}
+	if gwNode["status"] != "CRITICAL" {
+		t.Errorf("gateway saturado deveria ter status CRITICAL, obteve %s", gwNode["status"])
+	}
+	// effectiveRPS deve ser igual ao RateLimitRPS (50), não ao inRPS (200)
+	eff := gwNode["effectiveRPS"].(float64)
+	if eff != 50.0 {
+		t.Errorf("gateway effectiveRPS esperado 50, obteve %.1f", eff)
+	}
+}
+
+func TestSimulateHandlerQueueLagInMetrics(t *testing.T) {
+	// Queue com throughput=100 recebendo 300 RPS → lagEst=200 msg/s
+	payload := map[string]interface{}{
+		"nodes": []map[string]interface{}{
+			{"id": "c1", "type": "client", "label": "Client", "x": 50.0, "y": 100.0,
+				"config": map[string]interface{}{"RPS": 300.0}},
+			{"id": "q1", "type": "queue", "label": "Queue", "x": 250.0, "y": 100.0,
+				"config": map[string]interface{}{"ThroughputMaxMsgsPerSec": 100.0, "WriteLatencyMs": 1.0}},
+			{"id": "s1", "type": "service", "label": "Service", "x": 450.0, "y": 100.0,
+				"config": map[string]interface{}{"CPU_Cores": 4.0, "ProcessTimeMs": 5.0}},
+		},
+		"edges": []map[string]interface{}{
+			{"id": "e1", "from": "c1", "to": "q1", "trafficShare": 1.0, "config": map[string]interface{}{}},
+			{"id": "e2", "from": "q1", "to": "s1", "trafficShare": 1.0, "config": map[string]interface{}{}},
+		},
+	}
+	w := post(t, payload)
+	if w.Code != http.StatusOK {
+		t.Fatalf("esperava 200, obteve %d: %s", w.Code, w.Body.String())
+	}
+	var result map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &result)
+
+	nodes := result["nodes"].([]interface{})
+	var qNode map[string]interface{}
+	for _, n := range nodes {
+		nm := n.(map[string]interface{})
+		if nm["id"] == "q1" {
+			qNode = nm
+		}
+	}
+	if qNode == nil {
+		t.Fatal("nó queue não encontrado no resultado")
+	}
+	metrics := qNode["metrics"].(map[string]interface{})
+	lagEst := metrics["lagEst"].(float64)
+	if lagEst != 200.0 {
+		t.Errorf("lagEst esperado 200, obteve %.1f", lagEst)
+	}
+}
+
 func TestSimulateHandlerContentTypeIsJSON(t *testing.T) {
 	payload := map[string]interface{}{
 		"nodes": []map[string]interface{}{
