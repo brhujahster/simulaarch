@@ -334,7 +334,8 @@ function finishConnecting(toId) {
     }
 
     const fromType = state.nodes[fromId]?.type;
-    const edgeType = (fromType === 'queue') ? 'async' : 'sync';
+    const toType   = state.nodes[toId]?.type;
+    const edgeType = (fromType === 'queue' || toType === 'queue') ? 'async' : 'sync';
 
     const id = generateId('edge');
     state.edges[id] = {
@@ -390,7 +391,7 @@ function fieldHTML(id, label, value, type = 'number', { min = 0, step = 1, isFlo
     `;
 }
 
-function bindConfig(inputId, node, key, { isFloat = false, isInt = false } = {}) {
+function bindConfig(inputId, node, key, { isFloat = false } = {}) {
     const el = document.getElementById(inputId);
     if (!el) return;
     el.addEventListener('input', e => {
