@@ -1043,11 +1043,17 @@ function serializeNodeConfig(node) {
     }
 }
 
+// O backend usa "apigateway" mas o frontend armazena como "gateway" internamente.
+// Esta função converte para os tipos reconhecidos pelo motor de simulação Go.
+function toBackendType(frontendType) {
+    return frontendType === 'gateway' ? 'apigateway' : frontendType;
+}
+
 function buildSimulatePayload() {
     return {
         nodes: Object.values(state.nodes).map(n => ({
             id:     n.id,
-            type:   n.type,
+            type:   toBackendType(n.type),
             label:  n.label,
             x:      n.x,
             y:      n.y,

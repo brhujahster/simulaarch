@@ -202,6 +202,55 @@ func TestSimulateHandlerQueueImported(t *testing.T) {
 	}
 }
 
+func TestSimulateHandlerGatewayWrongTypeBypasses(t *testing.T) {
+	// Regressão: o frontend armazenava o gateway como type="gateway" (interno)
+	// mas enviava esse valor cru ao backend, que espera "apigateway".
+	// Com type="gateway" o motor cai no default e NÃO aplica rate limit.
+	// O fix em buildSimulatePayload (toBackendType) converte antes de enviar.
+	// Este teste documenta o comportamento do backend: "gateway" ≠ "apigateway".
+	payload := map[string]interface{}{
+		"nodes": []map[string]interface{}{
+			{"id": "c1", "type": "client", "config": map[string]interface{}{"RPS": 500.0}},
+			{"id": "gw", "type": "gateway", // tipo ERRADO — frontend não deveria enviar assim
+				"config": map[string]interface{}{"RateLimitRPS": 100.0, "LatencyOverheadMs": 5.0}},
+			{"id": "s1", "type": "service",
+				"config": map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 20.0}},
+		},
+		"edges": []map[string]interface{}{
+			{"id": "e1", "from": "c1", "to": "gw", "trafficShare": 1.0, "config": map[string]interface{}{}},
+			{"id": "e2", "from": "gw", "to": "s1", "trafficShare": 1.0, "config": map[string]interface{}{}},
+		},
+	}
+	w := post(t, payload)
+	if w.Code != http.StatusOK {
+		t.Fatalf("esperava 200, obteve %d", w.Code)
+	}
+	var result map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &result)
+	nodes := result["nodes"].([]interface{})
+	var gwNode map[string]interface{}
+	for _, n := range nodes {
+		nm := n.(map[string]interface{})
+		if nm["id"] == "gw" {
+			gwNode = nm
+		}
+	}
+	if gwNode == nil {
+		t.Fatal("nó gw não encontrado")
+	}
+	// Com type="gateway" (errado), o motor usa default: sem rate limit.
+	// effectiveRPS deve ser igual ao inRPS (500), não ao limite (100).
+	eff := gwNode["effectiveRPS"].(float64)
+	if eff != 500.0 {
+		t.Errorf("com type='gateway' (errado) effectiveRPS esperado 500 (sem rate limit), obteve %.1f", eff)
+	}
+	// utilization deve ser 0 (nó não reconhecido, não calcula utilização)
+	util := gwNode["utilization"].(float64)
+	if util != 0.0 {
+		t.Errorf("com type='gateway' (errado) utilization esperado 0, obteve %.2f", util)
+	}
+}
+
 func TestSimulateHandlerGatewayDropsInResult(t *testing.T) {
 	// Gateway com RateLimitRPS=50 recebendo 200 RPS → utilização=4 (CRITICAL)
 	// A resposta deve conter o nó gateway com utilization > 1 para o dashboard calcular drops
