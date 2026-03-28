@@ -292,6 +292,62 @@ func TestSimulateHandlerQueueLagInMetrics(t *testing.T) {
 	}
 }
 
+func TestSimulateHandlerMultiNodeFanOutTraffic(t *testing.T) {
+	// Verifica que tráfego com fan-out (trafficShare) é distribuído corretamente
+	// entre dois serviços — relevante para multi-select e visualização de arestas
+	payload := map[string]interface{}{
+		"nodes": []map[string]interface{}{
+			{"id": "c1", "type": "client", "label": "Client", "x": 50.0, "y": 200.0,
+				"config": map[string]interface{}{"RPS": 100.0}},
+			{"id": "gw", "type": "apigateway", "label": "Gateway", "x": 250.0, "y": 200.0,
+				"config": map[string]interface{}{"RateLimitRPS": 200.0, "LatencyOverheadMs": 5.0}},
+			{"id": "sa", "type": "service", "label": "Service A", "x": 450.0, "y": 100.0,
+				"config": map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 20.0}},
+			{"id": "sb", "type": "service", "label": "Service B", "x": 450.0, "y": 300.0,
+				"config": map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 20.0}},
+		},
+		"edges": []map[string]interface{}{
+			{"id": "e1", "from": "c1", "to": "gw", "trafficShare": 1.0, "config": map[string]interface{}{}},
+			{"id": "e2", "from": "gw", "to": "sa", "trafficShare": 0.5, "config": map[string]interface{}{}},
+			{"id": "e3", "from": "gw", "to": "sb", "trafficShare": 0.5, "config": map[string]interface{}{}},
+		},
+	}
+	w := post(t, payload)
+	if w.Code != http.StatusOK {
+		t.Fatalf("esperava 200, obteve %d: %s", w.Code, w.Body.String())
+	}
+	var result map[string]interface{}
+	json.Unmarshal(w.Body.Bytes(), &result)
+
+	nodes := result["nodes"].([]interface{})
+	nodeMap := map[string]map[string]interface{}{}
+	for _, n := range nodes {
+		nm := n.(map[string]interface{})
+		nodeMap[nm["id"].(string)] = nm
+	}
+
+	// Service A e B devem receber 50 RPS cada (fan-out com trafficShare=0.5)
+	saRPS := nodeMap["sa"]["effectiveRPS"].(float64)
+	sbRPS := nodeMap["sb"]["effectiveRPS"].(float64)
+	if saRPS != 50.0 {
+		t.Errorf("Service A effectiveRPS esperado 50, obteve %.1f", saRPS)
+	}
+	if sbRPS != 50.0 {
+		t.Errorf("Service B effectiveRPS esperado 50, obteve %.1f", sbRPS)
+	}
+
+	// Gateway não saturado (100 < 200 RPS)
+	if nodeMap["gw"]["status"] != "OK" {
+		t.Errorf("Gateway esperado OK, obteve %s", nodeMap["gw"]["status"])
+	}
+
+	// Resultado deve ter 2 rotas (Client→gw→sa e Client→gw→sb)
+	routes := result["routes"].([]interface{})
+	if len(routes) != 2 {
+		t.Errorf("esperava 2 rotas (fan-out), obteve %d", len(routes))
+	}
+}
+
 func TestSimulateHandlerContentTypeIsJSON(t *testing.T) {
 	payload := map[string]interface{}{
 		"nodes": []map[string]interface{}{

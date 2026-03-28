@@ -15,6 +15,8 @@
             <button id="btn-import">Importar JSON</button>
             <input type="file" id="file-input" accept=".json" style="display:none">
             <button id="btn-export">Exportar JSON</button>
+            <button id="btn-fit">⊡ Centralizar</button>
+            <button id="btn-snap">Snap: OFF</button>
             <button id="btn-simulate">▶ Rodar Simulação</button>
         </div>
     </header>
@@ -100,8 +102,10 @@
                         <polygon points="0 0, 10 3.5, 0 7" fill="#fab387"/>
                     </marker>
                 </defs>
-                <g id="edges-layer"></g>
-                <g id="nodes-layer"></g>
+                <g id="viewport">
+                    <g id="edges-layer"></g>
+                    <g id="nodes-layer"></g>
+                </g>
             </svg>
         </section>
 
