@@ -501,6 +501,57 @@ function bindConfigFields(node) {
     }
 }
 
+function simResultHTML(node) {
+    const r = node._simResult;
+    if (!r) {
+        return `<div class="sim-result-empty"><span>Execute a simulação para ver as métricas deste nó.</span></div>`;
+    }
+
+    const statusColor = r.status === 'CRITICAL' ? '#f38ba8'
+                      : r.status === 'ALERT'    ? '#f9e2af'
+                      : '#a6e3a1';
+    const utilizationPct = (r.utilization * 100).toFixed(1);
+
+    let rows = `
+        <div class="sim-result-entry">
+            <span>Status</span>
+            <span style="color:${statusColor};font-weight:700">${r.status}</span>
+        </div>
+        <div class="sim-result-entry">
+            <span>Utilização</span>
+            <span>${utilizationPct}%</span>
+        </div>
+        <div class="sim-result-entry">
+            <span>RPS efetivo</span>
+            <span>${r.effectiveRPS.toFixed(1)}</span>
+        </div>
+        <div class="sim-result-entry">
+            <span>Latência acum.</span>
+            <span>${r.latencyMs.toFixed(1)} ms</span>
+        </div>
+    `;
+
+    if (r.metrics) {
+        if (r.metrics.replicas !== undefined) {
+            rows += `<div class="sim-result-entry"><span>Réplicas</span><span>${r.metrics.replicas}</span></div>`;
+        }
+        if (r.metrics.isSaturated !== undefined) {
+            rows += `<div class="sim-result-entry"><span>Saturado</span><span>${r.metrics.isSaturated ? 'Sim' : 'Não'}</span></div>`;
+        }
+        if (r.metrics.ingressRPS !== undefined) {
+            rows += `<div class="sim-result-entry"><span>Ingress RPS</span><span>${r.metrics.ingressRPS.toFixed(1)}</span></div>`;
+        }
+        if (r.metrics.egressRPS !== undefined) {
+            rows += `<div class="sim-result-entry"><span>Egress RPS</span><span>${r.metrics.egressRPS.toFixed(1)}</span></div>`;
+        }
+        if (r.metrics.lagEst !== undefined && r.metrics.lagEst > 0) {
+            rows += `<div class="sim-result-entry"><span>Lag estimado</span><span>${r.metrics.lagEst.toFixed(1)} msg/s</span></div>`;
+        }
+    }
+
+    return `<div class="sim-result-panel">${rows}</div>`;
+}
+
 function showProperties(id, type) {
     const panel = document.getElementById('properties-panel');
 
@@ -521,9 +572,7 @@ function showProperties(id, type) {
             <hr class="prop-divider"/>
 
             <p class="prop-section-title">Resultado da Simulação</p>
-            <div id="sim-result-panel" class="sim-result-empty">
-                <span>Execute a simulação para ver as métricas deste nó.</span>
-            </div>
+            ${simResultHTML(node)}
 
             <hr class="prop-divider"/>
             <button id="btn-delete-node" class="btn-danger">Remover nó</button>
@@ -705,8 +754,145 @@ document.getElementById('btn-clear').addEventListener('click', () => {
     setStatus('Canvas limpo.', 'warn');
 });
 
-document.getElementById('btn-simulate').addEventListener('click', () => {
-    setStatus('Simulação ainda não implementada.', 'warn');
+// ─── Simulação ────────────────────────────────────────────────────────────────
+
+// Mapeia config frontend (camelCase) → chaves esperadas pelo backend Go
+function serializeNodeConfig(node) {
+    const c = node.config;
+    switch (node.type) {
+        case 'client':
+            return { RPS: c.rps ?? 100, PayloadSizeKB: c.payloadSizeKB ?? 1, Concurrency: c.concurrency ?? 10 };
+        case 'gateway':
+            return { RateLimitRPS: c.rateLimitRPS ?? 500, LatencyOverheadMs: c.latencyOverheadMs ?? 5 };
+        case 'service': {
+            const cfg = { CPU_Cores: c.cpuCores ?? 2, RAM_GB: c.ramGB ?? 2, ProcessTimeMs: c.processTimeMs ?? 50 };
+            if (c.clusterRef) cfg.clusterRef = c.clusterRef;
+            return cfg;
+        }
+        case 'queue':
+            return { ThroughputMaxMsgsPerSec: c.throughputMaxMsgsPerSec ?? 1000, WriteLatencyMs: c.writeLatencyMs ?? 2 };
+        case 'cluster':
+            return { MinReplicas: c.minReplicas ?? 1, MaxReplicas: c.maxReplicas ?? 5, HPA_Threshold: c.hpaThreshold ?? 0.7 };
+        default:
+            return { ...c };
+    }
+}
+
+function buildSimulatePayload() {
+    return {
+        nodes: Object.values(state.nodes).map(n => ({
+            id:     n.id,
+            type:   n.type,
+            label:  n.label,
+            x:      n.x,
+            y:      n.y,
+            config: serializeNodeConfig(n),
+        })),
+        edges: Object.values(state.edges).map(e => ({
+            id:           e.id,
+            from:         e.from,
+            to:           e.to,
+            type:         e.type,
+            trafficShare: e.trafficShare,
+            config:       e.config,
+        })),
+    };
+}
+
+function applySimulationResult(result) {
+    // Atualiza cor/status de cada nó no canvas
+    result.nodes.forEach(nr => {
+        const el = document.getElementById(nr.id);
+        if (!el) return;
+        const color = nr.status === 'CRITICAL' ? '#f38ba8'
+                    : nr.status === 'ALERT'    ? '#f9e2af'
+                    : '#a6e3a1';
+        el.querySelector('.node-bg')?.setAttribute('stroke', color);
+        // Guarda resultado no state para exibir no painel
+        if (state.nodes[nr.id]) state.nodes[nr.id]._simResult = nr;
+    });
+
+    // Atualiza painel se houver nó selecionado
+    if (state.selectedId && state.selectedType === 'node') showProperties(state.selectedId, 'node');
+
+    // Exibe modal de rotas
+    if (result.routes?.length) showRoutesModal(result.routes);
+}
+
+function showRoutesModal(routes) {
+    document.getElementById('routes-modal')?.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'routes-modal';
+    modal.className = 'routes-modal';
+
+    const nodeLabel = id => state.nodes[id]?.label || id;
+
+    const rows = routes.map(r => `
+        <tr>
+            <td class="route-path">${r.path.map(nodeLabel).join(' → ')}</td>
+            <td class="route-metric">${r.latencyMs.toFixed(1)} ms</td>
+            <td class="route-metric">${r.p95Ms.toFixed(1)} ms</td>
+            <td class="route-metric">${r.p99Ms.toFixed(1)} ms</td>
+        </tr>
+    `).join('');
+
+    modal.innerHTML = `
+        <div class="routes-modal-content">
+            <div class="routes-modal-header">
+                <span>Métricas de Latência por Rota</span>
+                <button id="routes-modal-close">✕</button>
+            </div>
+            <table class="routes-table">
+                <thead>
+                    <tr>
+                        <th>Rota</th>
+                        <th>p50 (média)</th>
+                        <th>p95 (×1.5)</th>
+                        <th>p99 (×2.0)</th>
+                    </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+    `;
+    document.body.appendChild(modal);
+    document.getElementById('routes-modal-close').addEventListener('click', () => modal.remove());
+    modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+
+document.getElementById('btn-simulate').addEventListener('click', async () => {
+    const nodes = Object.values(state.nodes);
+    if (nodes.length === 0) {
+        setStatus('Canvas vazio — adicione componentes antes de simular.', 'error');
+        return;
+    }
+    if (!nodes.some(n => n.type === 'client')) {
+        setStatus('Adicione pelo menos um Client antes de simular.', 'error');
+        return;
+    }
+
+    setStatus('Simulando…', 'warn');
+    document.getElementById('btn-simulate').disabled = true;
+
+    try {
+        const res = await fetch('/simulate', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify(buildSimulatePayload()),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            setStatus(`Erro: ${data.error}`, 'error');
+            return;
+        }
+        applySimulationResult(data);
+        setStatus(`Simulação concluída — ${data.routes?.length ?? 0} rota(s) analisada(s).`, 'success');
+    } catch (err) {
+        setStatus(`Falha na requisição: ${err.message}`, 'error');
+    } finally {
+        document.getElementById('btn-simulate').disabled = false;
+    }
 });
 
 // ─── Export / Import JSON ─────────────────────────────────────────────────────

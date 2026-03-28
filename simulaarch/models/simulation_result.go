@@ -7,9 +7,19 @@ const (
 )
 
 type SimulationResult struct {
-    Nodes  []NodeResult  `json:"nodes"`
-    Edges  []EdgeResult  `json:"edges"`
-    Errors []string      `json:"errors,omitempty"`
+	Nodes  []NodeResult  `json:"nodes"`
+	Edges  []EdgeResult  `json:"edges"`
+	Routes []RouteResult `json:"routes,omitempty"`
+	Errors []string      `json:"errors,omitempty"`
+}
+
+// RouteResult representa uma rota distinta do grafo (Client → folha)
+// com métricas de latência estimadas por aproximação estatística simples.
+type RouteResult struct {
+	Path      []string `json:"path"`      // IDs dos nós em ordem
+	LatencyMs float64  `json:"latencyMs"` // p50 / média estimada
+	P95Ms     float64  `json:"p95Ms"`     // p50 × 1.5
+	P99Ms     float64  `json:"p99Ms"`     // p50 × 2.0
 }
 
 type NodeResult struct {

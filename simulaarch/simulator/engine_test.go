@@ -817,3 +817,142 @@ func TestMixedSyncAsyncPaths(t *testing.T) {
 		t.Errorf("sb esperado OK, obteve %s", sb.Status)
 	}
 }
+
+// ─── Testes de findRoutes (métricas de latência por rota) ─────────────────────
+
+func TestRoutesSimplePath(t *testing.T) {
+	// Client → Service: uma única rota, latência = processTimeMs
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 100.0}),
+			node("s1", "service", map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 30.0}),
+		},
+		Edges: []models.Edge{edge("e1", "c1", "s1", 1.0)},
+	}
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+	if len(res.Routes) != 1 {
+		t.Fatalf("esperava 1 rota, obteve %d", len(res.Routes))
+	}
+	r := res.Routes[0]
+	// latência = edge(0) + service(30) = 30ms
+	if r.LatencyMs != 30 {
+		t.Errorf("latencyMs esperado 30, obteve %.1f", r.LatencyMs)
+	}
+	if r.P95Ms != 45 {
+		t.Errorf("p95Ms esperado 45 (30×1.5), obteve %.1f", r.P95Ms)
+	}
+	if r.P99Ms != 60 {
+		t.Errorf("p99Ms esperado 60 (30×2.0), obteve %.1f", r.P99Ms)
+	}
+	if len(r.Path) != 2 || r.Path[0] != "c1" || r.Path[1] != "s1" {
+		t.Errorf("path inesperado: %v", r.Path)
+	}
+}
+
+func TestRoutesWithAPIGateway(t *testing.T) {
+	// Client → APIGateway(5ms) → Service(20ms): latência = 5 + 20 = 25ms
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 100.0}),
+			node("gw", "apigateway", map[string]interface{}{"LatencyOverheadMs": 5.0, "RateLimitRPS": 500.0}),
+			node("s1", "service", map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 20.0}),
+		},
+		Edges: []models.Edge{
+			edge("e1", "c1", "gw", 1.0),
+			edge("e2", "gw", "s1", 1.0),
+		},
+	}
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+	if len(res.Routes) != 1 {
+		t.Fatalf("esperava 1 rota, obteve %d", len(res.Routes))
+	}
+	if res.Routes[0].LatencyMs != 25 {
+		t.Errorf("latencyMs esperado 25 (5+20), obteve %.1f", res.Routes[0].LatencyMs)
+	}
+}
+
+func TestRoutesFanOut(t *testing.T) {
+	// Client → Service → [ServiceA, ServiceB]: duas rotas distintas
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 100.0}),
+			node("s1", "service", map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 10.0}),
+			node("sa", "service", map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 20.0}),
+			node("sb", "service", map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 30.0}),
+		},
+		Edges: []models.Edge{
+			edge("e1", "c1", "s1", 1.0),
+			edge("e2", "s1", "sa", 0.5),
+			edge("e3", "s1", "sb", 0.5),
+		},
+	}
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+	if len(res.Routes) != 2 {
+		t.Fatalf("esperava 2 rotas (fan-out), obteve %d", len(res.Routes))
+	}
+	// latências: c1→s1→sa = 10+20=30ms; c1→s1→sb = 10+30=40ms
+	latencies := map[float64]bool{}
+	for _, r := range res.Routes {
+		latencies[r.LatencyMs] = true
+	}
+	if !latencies[30] {
+		t.Error("esperava rota com latência 30ms (c1→s1→sa)")
+	}
+	if !latencies[40] {
+		t.Error("esperava rota com latência 40ms (c1→s1→sb)")
+	}
+}
+
+func TestRoutesQueueAsAsyncBarrier(t *testing.T) {
+	// Client → Queue(writeLatency=5ms) → Service(25ms)
+	// Queue reseta acumulador: latência = 5 + 25 = 30ms (não inclui upstream do client)
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("c1", "client", map[string]interface{}{"RPS": 100.0}),
+			node("q1", "queue", map[string]interface{}{"ThroughputMaxMsgsPerSec": 200.0, "WriteLatencyMs": 5.0}),
+			node("s1", "service", map[string]interface{}{"CPU_Cores": 2.0, "ProcessTimeMs": 25.0}),
+		},
+		Edges: []models.Edge{
+			edge("e1", "c1", "q1", 1.0),
+			edge("e2", "q1", "s1", 1.0),
+		},
+	}
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+	if len(res.Routes) != 1 {
+		t.Fatalf("esperava 1 rota, obteve %d", len(res.Routes))
+	}
+	// queue reinicia acumulador; latência do caminho = writeLatency(5) + processTime(25)
+	if res.Routes[0].LatencyMs != 30 {
+		t.Errorf("latencyMs esperado 30 (barreira assíncrona: 5+25), obteve %.1f", res.Routes[0].LatencyMs)
+	}
+}
+
+func TestRoutesNoClientNoRoutes(t *testing.T) {
+	// Sem nó client: nenhuma rota deve ser enumerada
+	arch := models.Architecture{
+		Nodes: []models.Node{
+			node("s1", "service", map[string]interface{}{"CPU_Cores": 1.0, "ProcessTimeMs": 10.0}),
+			node("s2", "service", map[string]interface{}{"CPU_Cores": 1.0, "ProcessTimeMs": 20.0}),
+		},
+		Edges: []models.Edge{edge("e1", "s1", "s2", 1.0)},
+	}
+	res, err := Simulate(arch)
+	if err != nil {
+		t.Fatalf("erro inesperado: %v", err)
+	}
+	if len(res.Routes) != 0 {
+		t.Errorf("esperava 0 rotas sem client, obteve %d", len(res.Routes))
+	}
+}

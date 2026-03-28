@@ -67,6 +67,60 @@ func getFloat(config map[string]interface{}, key string, defaultVal float64) flo
 	return defaultVal
 }
 
+// findRoutes enumera todas as rotas distintas (Client → nó folha) no grafo
+// e calcula p50, p95 e p99 de latência por aproximação simples.
+// Nós Queue atuam como barreiras assíncronas: resetam o acumulador de latência.
+func findRoutes(g graph) []models.RouteResult {
+	var routes []models.RouteResult
+
+	var dfs func(path []string, accLatency float64)
+	dfs = func(path []string, accLatency float64) {
+		id := path[len(path)-1]
+		n := g.nodes[id]
+
+		var contrib float64
+		switch n.Type {
+		case "apigateway":
+			contrib = getFloat(n.Config, "LatencyOverheadMs", 0)
+		case "service":
+			contrib = getFloat(n.Config, "ProcessTimeMs", 0)
+		case "queue":
+			contrib = getFloat(n.Config, "WriteLatencyMs", 0)
+			accLatency = 0 // barreira assíncrona: reseta cadeia de latência
+		}
+
+		pathLatency := accLatency + contrib
+
+		outEdges := g.outEdges[id]
+		if len(outEdges) == 0 {
+			// nó folha: registra rota
+			routes = append(routes, models.RouteResult{
+				Path:      append([]string{}, path...),
+				LatencyMs: pathLatency,
+				P95Ms:     pathLatency * 1.5,
+				P99Ms:     pathLatency * 2.0,
+			})
+			return
+		}
+
+		for _, e := range outEdges {
+			edgeLatMs := getFloat(e.Config, "LatencyMs", 0)
+			newPath := make([]string, len(path)+1)
+			copy(newPath, path)
+			newPath[len(path)] = e.To
+			dfs(newPath, pathLatency+edgeLatMs)
+		}
+	}
+
+	for id, n := range g.nodes {
+		if n.Type == "client" {
+			dfs([]string{id}, 0)
+		}
+	}
+
+	return routes
+}
+
 func statusFor(utilization float64) string {
 	if utilization >= 1.0 {
 		return models.StatusCritical
@@ -267,6 +321,8 @@ func Simulate(arch models.Architecture) (models.SimulationResult, error) {
 			LatencyMs: edgeLatency[e.ID],
 		})
 	}
+
+	result.Routes = findRoutes(g)
 
 	return result, nil
 }
