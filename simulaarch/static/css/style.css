@@ -102,10 +102,46 @@ body {
     flex-shrink: 0;
 }
 
-#app-title {
+#title-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#app-brand {
     font-weight: 700;
     font-size: 16px;
     color: #cba6f7;
+    user-select: none;
+}
+
+#title-sep {
+    color: #45475a;
+    font-size: 16px;
+    user-select: none;
+}
+
+#scenario-name {
+    font-weight: 600;
+    font-size: 15px;
+    color: #cdd6f4;
+    cursor: text;
+    border-bottom: 1px dashed transparent;
+    border-radius: 3px;
+    padding: 1px 5px;
+    outline: none;
+    min-width: 40px;
+    max-width: 280px;
+    white-space: nowrap;
+    overflow: hidden;
+    transition: border-color 0.18s, background 0.18s;
+}
+
+#scenario-name:hover { border-bottom-color: #45475a; }
+
+#scenario-name:focus {
+    border-bottom-color: #cba6f7;
+    background: rgba(203, 166, 247, 0.08);
 }
 
 #topbar-actions {
