@@ -91,17 +91,38 @@ function renderNode(node) {
 
     const color = NODE_COLORS[node.type] || '#cdd6f4';
     const isSelected = state.selectedId === node.id;
+    const sim = node._simResult;
+
+    // Stroke color: selected > sim status > node default
+    const strokeColor = isSelected ? '#f9e2af'
+        : sim ? (sim.status === 'CRITICAL' ? '#f38ba8'
+               : sim.status === 'ALERT'    ? '#f9e2af'
+               : '#a6e3a1')
+        : color;
+
+    // Utilization badge (hidden for client and cluster)
+    const badgeHTML = sim && node.type !== 'client' && node.type !== 'cluster' ? (() => {
+        const pct = (sim.utilization * 100).toFixed(0);
+        const bc = sim.status === 'CRITICAL' ? '#f38ba8'
+                 : sim.status === 'ALERT'    ? '#f9e2af'
+                 : '#a6e3a1';
+        return `<rect x="${NODE_W - 36}" y="-9" width="36" height="14" rx="7" fill="${bc}" fill-opacity="0.92"/>
+                <text x="${NODE_W - 18}" y="0" text-anchor="middle" fill="#1e1e2e" font-size="9" font-weight="700"
+                      font-family="'Segoe UI', sans-serif">${pct}%</text>`;
+    })() : '';
 
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.setAttribute('id', node.id);
-    g.setAttribute('class', 'canvas-node');
+    const classes = ['canvas-node'];
+    if (sim?.status === 'CRITICAL') classes.push('node-critical');
+    g.setAttribute('class', classes.join(' '));
     g.setAttribute('transform', `translate(${node.x}, ${node.y})`);
     g.style.cursor = state.connecting ? 'crosshair' : 'pointer';
 
     g.innerHTML = `
         <rect class="node-bg" x="0" y="0" width="${NODE_W}" height="${NODE_H}"
               rx="8" fill="#1e1e2e"
-              stroke="${isSelected ? '#f9e2af' : color}"
+              stroke="${strokeColor}"
               stroke-width="${isSelected ? 2.5 : 1.5}"/>
         <svg x="6" y="8" width="40" height="40" viewBox="0 0 40 32">
             ${getNodeIcon(node.type, color)}
@@ -115,6 +136,7 @@ function renderNode(node) {
         <circle class="node-port" cx="${NODE_W}" cy="${NODE_H / 2}"
                 r="5" fill="${color}" stroke="#1e1e2e" stroke-width="1.5"
                 style="cursor:crosshair"/>
+        ${badgeHTML}
         ${(() => {
             if (node.type === 'service' && node.config?.clusterRef) {
                 const cl = state.nodes[node.config.clusterRef];
@@ -126,6 +148,11 @@ function renderNode(node) {
             return '';
         })()}
     `;
+
+    // Tooltip
+    g.addEventListener('mouseenter', e => showTooltip(node, e.clientX, e.clientY));
+    g.addEventListener('mousemove',  e => moveTooltip(e.clientX, e.clientY));
+    g.addEventListener('mouseleave', hideTooltip);
 
     // Click on port → start connecting
     const port = g.querySelector('.node-port');
@@ -154,6 +181,7 @@ function renderNode(node) {
 
         const onMove = ev => {
             if (!dragging) return;
+            hideTooltip();
             node.x = ev.clientX - rect.left - dragOffX;
             node.y = ev.clientY - rect.top - dragOffY;
             g.setAttribute('transform', `translate(${node.x}, ${node.y})`);
@@ -173,11 +201,60 @@ function renderNode(node) {
     layer.appendChild(g);
 }
 
+// ─── Tooltip ──────────────────────────────────────────────────────────────────
+
+function showTooltip(node, x, y) {
+    const tip = document.getElementById('node-tooltip');
+    const sim = node._simResult;
+
+    let html = `<div class="tip-title">${node.label}</div>
+                <div class="tip-type">${NODE_LABELS[node.type] || node.type}</div>`;
+
+    if (sim) {
+        const sc = sim.status === 'CRITICAL' ? '#f38ba8'
+                 : sim.status === 'ALERT'    ? '#f9e2af'
+                 : '#a6e3a1';
+        html += `<hr class="tip-divider"/>
+                 <div class="tip-row"><span>Status</span><span style="color:${sc};font-weight:700">${sim.status}</span></div>
+                 <div class="tip-row"><span>Utilização</span><span>${(sim.utilization * 100).toFixed(1)}%</span></div>
+                 <div class="tip-row"><span>RPS Efetivo</span><span>${sim.effectiveRPS.toFixed(1)}</span></div>
+                 <div class="tip-row"><span>Latência</span><span>${sim.latencyMs.toFixed(1)} ms</span></div>`;
+        if (sim.metrics?.lagEst > 0)
+            html += `<div class="tip-row"><span>Lag Fila</span><span style="color:#f9e2af">${sim.metrics.lagEst.toFixed(1)} msg/s</span></div>`;
+        if (sim.metrics?.replicas !== undefined)
+            html += `<div class="tip-row"><span>Réplicas</span><span>${sim.metrics.replicas}</span></div>`;
+    } else {
+        html += `<div class="tip-hint">Execute a simulação para ver métricas.</div>`;
+    }
+
+    tip.innerHTML = html;
+    tip.style.display = 'block';
+    moveTooltip(x, y);
+}
+
+function moveTooltip(x, y) {
+    const tip = document.getElementById('node-tooltip');
+    let left = x + 14;
+    let top  = y + 14;
+    if (left + 190 > window.innerWidth)  left = x - 190 - 14;
+    if (top  + 160 > window.innerHeight) top  = y - 160 - 14;
+    tip.style.left = left + 'px';
+    tip.style.top  = top  + 'px';
+}
+
+function hideTooltip() {
+    document.getElementById('node-tooltip').style.display = 'none';
+}
+
 // ─── Render Edges ─────────────────────────────────────────────────────────────
 
 function renderEdges() {
     const layer = document.getElementById('edges-layer');
     layer.innerHTML = '';
+
+    // Max RPS across all simulated edges (for proportional width scaling)
+    const allRPS = Object.values(state.edges).map(e => e._simResult?.rpsFlow ?? 0);
+    const maxRPS = Math.max(...allRPS, 1);
 
     Object.values(state.edges).forEach(edge => {
         const from = state.nodes[edge.from];
@@ -190,16 +267,33 @@ function renderEdges() {
         const y2 = to.y + NODE_H / 2;
         const mx = (x1 + x2) / 2;
 
-        const isAsync      = edge.type === 'async';
-        const isSelected   = state.selectedId === edge.id;
-        const color        = isSelected ? '#f9e2af' : (isAsync ? '#fab387' : '#6c7086');
-        const marker       = isAsync ? 'url(#arrowhead-async)' : 'url(#arrowhead)';
+        const isAsync    = edge.type === 'async';
+        const isSelected = state.selectedId === edge.id;
+        const simResult  = edge._simResult;
+
+        let color, strokeWidth;
+        if (isSelected) {
+            color = '#f9e2af';
+            strokeWidth = 3;
+        } else if (simResult) {
+            const ratio = simResult.rpsFlow / maxRPS;
+            color = ratio >= 0.75 ? '#f38ba8'
+                  : ratio >= 0.40 ? '#f9e2af'
+                  : simResult.rpsFlow > 0 ? '#a6e3a1'
+                  : '#313244';
+            strokeWidth = Math.max(1.5, Math.min(5, 1.5 + ratio * 3.5));
+        } else {
+            color = isAsync ? '#fab387' : '#6c7086';
+            strokeWidth = 2;
+        }
+
+        const marker = isAsync ? 'url(#arrowhead-async)' : 'url(#arrowhead)';
 
         const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
         path.setAttribute('d', `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`);
         path.setAttribute('fill', 'none');
         path.setAttribute('stroke', color);
-        path.setAttribute('stroke-width', isSelected ? '3' : '2');
+        path.setAttribute('stroke-width', strokeWidth);
         if (isAsync) path.setAttribute('stroke-dasharray', '6,3');
         path.setAttribute('marker-end', marker);
         path.style.cursor = 'pointer';
@@ -800,17 +894,20 @@ function buildSimulatePayload() {
 }
 
 function applySimulationResult(result) {
-    // Atualiza cor/status de cada nó no canvas
+    // Armazena resultados nos nós e arestas do state
     result.nodes.forEach(nr => {
-        const el = document.getElementById(nr.id);
-        if (!el) return;
-        const color = nr.status === 'CRITICAL' ? '#f38ba8'
-                    : nr.status === 'ALERT'    ? '#f9e2af'
-                    : '#a6e3a1';
-        el.querySelector('.node-bg')?.setAttribute('stroke', color);
-        // Guarda resultado no state para exibir no painel
         if (state.nodes[nr.id]) state.nodes[nr.id]._simResult = nr;
     });
+    result.edges.forEach(er => {
+        if (state.edges[er.id]) state.edges[er.id]._simResult = er;
+    });
+
+    // Re-renderiza tudo com dados de simulação
+    Object.values(state.nodes).forEach(renderNode);
+    renderEdges();
+
+    // Exibe legenda
+    document.getElementById('canvas-legend')?.classList.add('visible');
 
     // Atualiza painel se houver nó selecionado
     if (state.selectedId && state.selectedType === 'node') showProperties(state.selectedId, 'node');

@@ -84,6 +84,11 @@
         </aside>
 
         <section id="canvas-container">
+            <div id="canvas-legend">
+                <div class="legend-item"><span class="legend-dot" style="background:#a6e3a1"></span> OK</div>
+                <div class="legend-item"><span class="legend-dot" style="background:#f9e2af"></span> ALERT</div>
+                <div class="legend-item"><span class="legend-dot" style="background:#f38ba8"></span> CRITICAL</div>
+            </div>
             <svg id="canvas">
                 <defs>
                     <marker id="arrowhead" markerWidth="10" markerHeight="7"
@@ -105,6 +110,7 @@
         </aside>
     </main>
     <footer id="statusbar"><span id="status-text">Pronto</span></footer>
+    <div id="node-tooltip"></div>
     <script src="/static/js/app.js"></script>
 </body>
 </html>
